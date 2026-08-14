@@ -1,0 +1,19 @@
+.dsh-view {
+  position: relative;
+}
+
+.dsh-status {
+  padding: 16px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  white-space: pre-wrap;
+}
+
+.dsh-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--background-primary);
+}

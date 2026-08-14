@@ -1,0 +1,23 @@
+{
+  "name": "dsh-obsidian",
+  "version": "0.1.0",
+  "description": "Embed DeepSeek Harness Web UI in Obsidian, one isolated workspace per vault.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "tsc -p tsconfig.json --watch",
+    "build": "tsc -p tsconfig.json"
+  },
+  "keywords": [
+    "obsidian",
+    "deepseek",
+    "dsh",
+    "ai"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.7.0",
+    "typescript": "^5.6.0"
+  }
+}
