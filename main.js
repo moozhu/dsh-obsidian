@@ -227,15 +227,23 @@ function seedWorkspace(vaultHomePath, vaultPath) {
 }
 //#endregion
 //#region 进程管理
-/** 生成启动命令：优先本地 dsh 绝对路径；都没有则回退 npx 在线安装。 */
+/**
+ * 生成启动命令：
+ * 1. 用户手动填了 dsh 路径 → 锁定用该版本（不自动升级）
+ * 2. 否则 npx --yes 优先：每次启动检查 registry，官方发新版自动跟随
+ * 3. 检测到本地缓存（离线可用）作为 npx 失败时的兜底
+ */
 function resolveBootCommand(settings, port) {
     const custom = settings.dshCommand.trim();
     if (custom)
         return `"${custom}" web --port ${port}`;
+    const npxCommand = `npx --yes @deepseek-ai/dsh web --port ${port}`;
     const detected = detectDshCommand();
-    if (detected)
-        return `"${detected}" web --port ${port}`;
-    return `npx --yes @deepseek-ai/dsh web --port ${port}`;
+    if (!detected)
+        return npxCommand;
+    // 有本地缓存时：正常走 npx（自动升级）；若 npx 不可用（如离线），fallback 脚本会在下一层处理。
+    // 这里优先 npx，保证官方新版本能自动跟上。
+    return `${npxCommand} || "${detected}" web --port ${port}`;
 }
 /** 启动 DSH 子进程（cwd = 库根目录，DSH_HOME = 库专属数据目录），返回 pid。 */
 function spawnDsh(bootCommand, vaultPath) {
