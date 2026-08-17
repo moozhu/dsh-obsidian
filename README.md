@@ -4,6 +4,47 @@
 
 > 架构上插件只是「启动器 + 纯 iframe 客户端」：不调用 DSH 任何 API，DSH 内核升级后插件无需改动、无需卸载，重启实例即用上新内核。
 
+---
+
+## English
+
+**DSH for Obsidian** embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) web UI inside Obsidian. Each vault gets its **own isolated DSH instance**: open a vault and DSH starts with that vault as its workspace automatically. Session histories stay per-vault and never mix.
+
+### Features
+
+- One DSH instance per vault: isolated workspaces and chat histories
+- The vault root is registered as the default workspace — no manual setup
+- Automatically starts/stops the DSH server with Obsidian (configurable)
+- Session data lives outside the vault (in `%LOCALAPPDATA%`), so your notes stay clean
+- Workspaces can still be added/switched inside DSH if you need more
+
+### Requirements
+
+- Obsidian desktop (v1.4+, Windows)
+- [Node.js](https://nodejs.org) — the plugin detects it at startup and shows a download link in the panel if missing
+
+### Architecture & how it works
+
+The plugin is a **launcher + plain iframe client**. It does not bundle or call any DSH API:
+
+1. On first open it starts a local `dsh web` server (via `npx`, keeping the kernel up to date automatically; falls back to the local cache when offline)
+2. The DSH UI loads in an iframe panel (sidebar or tab)
+3. Each vault gets a deterministic port and its own data directory (`DSH_HOME`), so vaults never interfere with each other or with the desktop app
+
+Because the plugin never depends on DSH internals, upgrading DSH is just a matter of restarting the panel — the plugin itself never needs an update for that.
+
+### Install
+
+- **Community store**: search "DSH for Obsidian" (once approved)
+- **BRAT**: add `moozhu/dsh-obsidian`
+- **Manual**: download the release zip and extract to `.obsidian/plugins/dsh-obsidian/`
+
+### Usage
+
+Click the whale icon in the left ribbon (or run "Open DSH panel" from the command palette). The panel shows a start status, then loads the DSH UI with your vault as the active workspace. Start chatting to manage your notes.
+
+---
+
 ## 前置条件
 
 - Obsidian 桌面版（v1.4+，Windows）
