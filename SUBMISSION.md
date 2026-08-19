@@ -10,7 +10,7 @@
 
 ## 自查清单
 
-- [x] `manifest.json`：id `dsh-obsidian`（全小写无空格）、version `0.1.1`（semver）、author/authorUrl 为 `moozhu`、isDesktopOnly true
+- [x] `manifest.json`：id `dsh-ob`（全小写、仅字母/连字符、不含 `obsidian`、不以 `plugin` 结尾）、version `0.1.2`（semver）、author/authorUrl 为 `moozhu`、isDesktopOnly true
 - [x] `versions.json`：`"0.1.1": "1.4.0"` 存在
 - [x] 仓库有 `LICENSE`（MIT）
 - [x] 仓库包含源码（`src/main.ts` 等）+ 构建产物（`main.js`），无混淆
@@ -25,7 +25,7 @@
    用于校验你确实拥有要提交的仓库。（官网文档叫 "Set up and claim" / "Add a plugin or theme"）
 3. **添加插件**：进入目录，选 Add a plugin，填/关联你的仓库 `moozhu/dsh-obsidian`。
    目录会读取仓库默认分支的 `manifest.json`，并校验：
-   - `id` 在所有已发布插件中唯一
+   - `id`（`dsh-ob`）在所有已发布插件中唯一
    - 存在与 manifest 中 `version` 匹配的 GitHub Release 及配套 `main.js` / `manifest.json` / `styles.css`
    - 满足 [Developer policies](https://docs.obsidian.md/Developer+policies)
 4. **处理自动审查反馈**：提交后网站自动审查并在该插件详情页显示指引/错误。

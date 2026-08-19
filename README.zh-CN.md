@@ -25,8 +25,8 @@
 
 ### 方式三：手动安装
 
-1. 下载 Release 的 `dsh-obsidian-x.y.z.zip`
-2. 解压到 `<你的库>\.obsidian\plugins\dsh-obsidian\`（解压后该目录下应有 `main.js`、`manifest.json`、`styles.css`）
+1. 下载 Release 的 `dsh-ob-x.y.z.zip`
+2. 解压到 `<你的库>\.obsidian\plugins\dsh-ob\`（解压后该目录下应有 `main.js`、`manifest.json`、`styles.css`）
 3. 重启 Obsidian → 设置 → 第三方插件 → 启用「DSH for Obsidian」
 
 ## 使用

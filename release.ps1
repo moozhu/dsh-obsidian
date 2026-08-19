@@ -21,12 +21,12 @@ $manifestPath = Join-Path $root 'manifest.json'
 $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
 $minApp = $manifest.minAppVersion
 $manifest.version = $Version
-[System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json), $Utf8NoBom)
+[System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 10), $Utf8NoBom)
 
 $versionsPath = Join-Path $root 'versions.json'
 $versions = [System.IO.File]::ReadAllText($versionsPath) | ConvertFrom-Json
 $versions | Add-Member -NotePropertyName $Version -NotePropertyValue $minApp -Force
-[System.IO.File]::WriteAllText($versionsPath, ($versions | ConvertTo-Json), $Utf8NoBom)
+[System.IO.File]::WriteAllText($versionsPath, ($versions | ConvertTo-Json -Depth 10), $Utf8NoBom)
 
 Write-Host "==> Building ..."
 npm run build | Out-Null
@@ -34,7 +34,7 @@ npm run build | Out-Null
 Write-Host "==> Packing release zip ..."
 $releaseDir = Join-Path $root 'release'
 New-Item -ItemType Directory -Force $releaseDir | Out-Null
-$zipPath = Join-Path $releaseDir "dsh-obsidian-$Version.zip"
+$zipPath = Join-Path $releaseDir "dsh-ob-$Version.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path (Join-Path $root 'main.js'), (Join-Path $root 'manifest.json'), (Join-Path $root 'styles.css') -DestinationPath $zipPath
 

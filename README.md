@@ -25,8 +25,8 @@ Settings → Community plugins → Browse → search "DSH for Obsidian" → Inst
 
 ### Manual
 
-1. Download `dsh-obsidian-x.y.z.zip` from [Releases](https://github.com/moozhu/dsh-obsidian/releases)
-2. Extract to `<your-vault>\.obsidian\plugins\dsh-obsidian\` (must contain `main.js`, `manifest.json`, `styles.css`)
+1. Download `dsh-ob-x.y.z.zip` from [Releases](https://github.com/moozhu/dsh-obsidian/releases)
+2. Extract to `<your-vault>\.obsidian\plugins\dsh-ob\` (must contain `main.js`, `manifest.json`, `styles.css`)
 3. Restart Obsidian → Settings → Community plugins → enable "DSH for Obsidian"
 
 ## Usage

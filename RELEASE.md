@@ -35,7 +35,7 @@ cd E:\OneDrive\deepseek\dsh-obsidian
 然后在 GitHub 网页上：
 1. Releases → Draft a new release
 2. Tag 填 `0.1.1`（创建新 tag）
-3. 上传 `release\dsh-obsidian-0.1.1.zip`
+3. 上传 `release\dsh-ob-0.1.1.zip`
 4. 发布
 
 ## 四、提交官方社区商店（审核制，可选）
