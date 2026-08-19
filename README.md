@@ -1,4 +1,4 @@
-# DSH for Obsidian
+# DSH for Vaults
 
 > 🌐 [简体中文](README.zh-CN.md)
 
@@ -15,7 +15,7 @@ Embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) we
 
 ### Community Store (once approved)
 
-Settings → Community plugins → Browse → search "DSH for Obsidian" → Install.
+Settings → Community plugins → Browse → search "DSH for Vaults" → Install.
 
 ### BRAT (GitHub-based, with auto-updates)
 
@@ -27,7 +27,7 @@ Settings → Community plugins → Browse → search "DSH for Obsidian" → Inst
 
 1. Download `dsh-ob-x.y.z.zip` from [Releases](https://github.com/moozhu/dsh-obsidian/releases)
 2. Extract to `<your-vault>\.obsidian\plugins\dsh-ob\` (must contain `main.js`, `manifest.json`, `styles.css`)
-3. Restart Obsidian → Settings → Community plugins → enable "DSH for Obsidian"
+3. Restart Obsidian → Settings → Community plugins → enable "DSH for Vaults"
 
 ## Usage
 

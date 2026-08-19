@@ -1,4 +1,4 @@
-# DSH for Obsidian
+# DSH for Vaults
 
 > 🌐 [English](README.md)
 
@@ -15,7 +15,7 @@
 
 ### 方式一：官方社区商店（上架后）
 
-设置 → 第三方插件 → 浏览 → 搜索「DSH for Obsidian」→ 安装。
+设置 → 第三方插件 → 浏览 → 搜索「DSH for Vaults」→ 安装。
 
 ### 方式二：BRAT（GitHub 仓库分发，支持自动更新）
 
@@ -27,7 +27,7 @@
 
 1. 下载 Release 的 `dsh-ob-x.y.z.zip`
 2. 解压到 `<你的库>\.obsidian\plugins\dsh-ob\`（解压后该目录下应有 `main.js`、`manifest.json`、`styles.css`）
-3. 重启 Obsidian → 设置 → 第三方插件 → 启用「DSH for Obsidian」
+3. 重启 Obsidian → 设置 → 第三方插件 → 启用「DSH for Vaults」
 
 ## 使用
 

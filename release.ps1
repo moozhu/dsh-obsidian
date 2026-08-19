@@ -39,7 +39,7 @@ if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 Compress-Archive -Path (Join-Path $root 'main.js'), (Join-Path $root 'manifest.json'), (Join-Path $root 'styles.css') -DestinationPath $zipPath
 
 Write-Host "==> Publishing GitHub release (zip + standalone files, for BRAT) ..."
-gh release create $Version $zipPath --title $Version --notes "DSH for Obsidian $Version" 2>$null
+gh release create $Version $zipPath --title $Version --notes "DSH for Vaults $Version" 2>$null
 gh release upload $Version (Join-Path $root 'main.js'), (Join-Path $root 'manifest.json'), (Join-Path $root 'styles.css') --clobber 2>$null
 
 Write-Host ""
