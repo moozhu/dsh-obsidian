@@ -126,7 +126,7 @@ async function waitForDsh(port: number, timeoutMs = 120000): Promise<void> {
     if (Date.now() > deadline) {
       throw new Error(`DSH 启动超时（端口 ${port}），请检查 Node.js 是否安装、路径设置是否正确`);
     }
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => window.setTimeout(r, 1000));
   }
 }
 
@@ -138,7 +138,7 @@ function probeNode(timeoutMs = 8000): Promise<boolean> {
       windowsHide: true,
       stdio: "ignore",
     });
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       try {
         child.kill();
       } catch {
@@ -147,11 +147,11 @@ function probeNode(timeoutMs = 8000): Promise<boolean> {
       resolve(false);
     }, timeoutMs);
     child.on("error", () => {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
       resolve(false);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
       resolve(code === 0);
     });
   });
@@ -300,8 +300,8 @@ function mergeYamlFile(sourcePath: string, targetPath: string): string {
   }
   if (!existsSync(targetPath)) return sourceDoc.toString({});
   const targetDoc = parseDocument(readFileSync(targetPath, "utf8"));
-  const sourceRoot = sourceDoc.toJS();
-  const targetRoot = targetDoc.toJS();
+  const sourceRoot = sourceDoc.toJS() as Record<string, unknown> | null;
+  const targetRoot = targetDoc.toJS() as Record<string, unknown> | null;
   if (
     sourceRoot !== null &&
     typeof sourceRoot === "object" &&
@@ -340,7 +340,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 interface WorkspaceStorage {
   unit: { name: string; version: number };
-  global: { initialized: boolean; workspaceIds: string[]; archivedSessionIds: string[] };
+  globalState: { initialized: boolean; workspaceIds: string[]; archivedSessionIds: string[] };
   tables: { workspaces: Record<string, unknown> };
 }
 
@@ -374,14 +374,14 @@ function seedWorkspace(vaultHomePath: string, vaultPath: string): void {
   if (data === null) {
     data = {
       unit: { name: "workspace", version: 2 },
-      global: { initialized: true, workspaceIds: [], archivedSessionIds: [] },
+      globalState: { initialized: true, workspaceIds: [], archivedSessionIds: [] },
       tables: { workspaces: {} },
     };
   }
 
   const id = randomUUID();
   const now = new Date().toISOString();
-  data.global.workspaceIds = [...(data.global.workspaceIds ?? []), id];
+  data.globalState.workspaceIds = [...(data.globalState.workspaceIds ?? []), id];
   data.tables.workspaces[id] = {
     path: canonical,
     title: basename(canonical),
@@ -642,7 +642,8 @@ export default class DshPlugin extends Plugin {
     if (!existing) {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
-    await workspace.revealLeaf(leaf);
+    // 用 1.4.0 即有的 setActiveLeaf 聚焦（revealLeaf 需 Obsidian >= 1.7.2，会突破声明的 minAppVersion）
+    workspace.setActiveLeaf(leaf);
   }
 
   updateStatusBar(text: string): void {
@@ -650,7 +651,8 @@ export default class DshPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = (await this.loadData()) as Partial<typeof DEFAULT_SETTINGS> | null;
+    this.settings = { ...DEFAULT_SETTINGS, ...saved };
   }
 
   async saveSettings(): Promise<void> {
@@ -671,7 +673,7 @@ class DshSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "DSH for Vaults" });
+    new Setting(containerEl).setName("DSH for Vaults").setHeading();
     containerEl.createEl("p", {
       text: "在 Obsidian 中嵌入 DeepSeek Harness Web UI，按库（vault）管理独立的工作区与会话。",
     });
@@ -743,6 +745,11 @@ class DshSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+  }
+
+  /** Obsidian 1.13+ settings search integration (optional but recommended). */
+  getSettingDefinitions(): never[] {
+    return [];
   }
 }
 

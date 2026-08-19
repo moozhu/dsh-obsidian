@@ -7427,7 +7427,7 @@ async function waitForDsh(port, timeoutMs = 12e4) {
     if (Date.now() > deadline) {
       throw new Error(`DSH \u542F\u52A8\u8D85\u65F6\uFF08\u7AEF\u53E3 ${port}\uFF09\uFF0C\u8BF7\u68C0\u67E5 Node.js \u662F\u5426\u5B89\u88C5\u3001\u8DEF\u5F84\u8BBE\u7F6E\u662F\u5426\u6B63\u786E`);
     }
-    await new Promise((r) => setTimeout(r, 1e3));
+    await new Promise((r) => window.setTimeout(r, 1e3));
   }
 }
 function probeNode(timeoutMs = 8e3) {
@@ -7437,7 +7437,7 @@ function probeNode(timeoutMs = 8e3) {
       windowsHide: true,
       stdio: "ignore"
     });
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       try {
         child.kill();
       } catch {
@@ -7445,11 +7445,11 @@ function probeNode(timeoutMs = 8e3) {
       resolve(false);
     }, timeoutMs);
     child.on("error", () => {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
       resolve(false);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
       resolve(code === 0);
     });
   });
@@ -7578,13 +7578,13 @@ function seedWorkspace(vaultHomePath, vaultPath) {
   if (data === null) {
     data = {
       unit: { name: "workspace", version: 2 },
-      global: { initialized: true, workspaceIds: [], archivedSessionIds: [] },
+      globalState: { initialized: true, workspaceIds: [], archivedSessionIds: [] },
       tables: { workspaces: {} }
     };
   }
   const id = (0, import_crypto.randomUUID)();
   const now = (/* @__PURE__ */ new Date()).toISOString();
-  data.global.workspaceIds = [...data.global.workspaceIds ?? [], id];
+  data.globalState.workspaceIds = [...data.globalState.workspaceIds ?? [], id];
   data.tables.workspaces[id] = {
     path: canonical,
     title: (0, import_path.basename)(canonical),
@@ -7766,13 +7766,14 @@ var DshPlugin = class extends import_obsidian.Plugin {
     if (!existing) {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
-    await workspace.revealLeaf(leaf);
+    workspace.setActiveLeaf(leaf);
   }
   updateStatusBar(text) {
     if (this.statusBar) this.statusBar.setText(`DSH: ${text}`);
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = await this.loadData();
+    this.settings = { ...DEFAULT_SETTINGS, ...saved };
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -7789,7 +7790,7 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "DSH for Vaults" });
+    new import_obsidian.Setting(containerEl).setName("DSH for Vaults").setHeading();
     containerEl.createEl("p", {
       text: "\u5728 Obsidian \u4E2D\u5D4C\u5165 DeepSeek Harness Web UI\uFF0C\u6309\u5E93\uFF08vault\uFF09\u7BA1\u7406\u72EC\u7ACB\u7684\u5DE5\u4F5C\u533A\u4E0E\u4F1A\u8BDD\u3002"
     });
@@ -7830,5 +7831,9 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+  }
+  /** Obsidian 1.13+ settings search integration (optional but recommended). */
+  getSettingDefinitions() {
+    return [];
   }
 };

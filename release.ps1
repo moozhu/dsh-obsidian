@@ -3,13 +3,13 @@ param(
   [string]$Version
 )
 
-# Release script: bump version -> build -> pack release zip
+# Release script: bump version -> build -> commit -> push tag (CI creates release + attestation)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
-  Write-Error "Version must be semver, e.g. 0.1.1"
+  Write-Error "Version must be semver, e.g. 0.1.3"
 }
 
 Write-Host "==> Updating manifest.json / versions.json to $Version ..."
@@ -31,17 +31,15 @@ $versions | Add-Member -NotePropertyName $Version -NotePropertyValue $minApp -Fo
 Write-Host "==> Building ..."
 npm run build | Out-Null
 
-Write-Host "==> Packing release zip ..."
-$releaseDir = Join-Path $root 'release'
-New-Item -ItemType Directory -Force $releaseDir | Out-Null
-$zipPath = Join-Path $releaseDir "dsh-ob-$Version.zip"
-if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-Compress-Archive -Path (Join-Path $root 'main.js'), (Join-Path $root 'manifest.json'), (Join-Path $root 'styles.css') -DestinationPath $zipPath
+Write-Host "==> Committing and pushing ..."
+git add -A
+git commit -m "v$Version"
+git push origin main
 
-Write-Host "==> Publishing GitHub release (zip + standalone files, for BRAT) ..."
-gh release create $Version $zipPath --title $Version --notes "DSH for Vaults $Version" 2>$null
-gh release upload $Version (Join-Path $root 'main.js'), (Join-Path $root 'manifest.json'), (Join-Path $root 'styles.css') --clobber 2>$null
+Write-Host "==> Pushing tag to trigger CI release + attestation ..."
+git tag $Version
+git push origin $Version
 
 Write-Host ""
-Write-Host "Done! Next steps:"
-Write-Host "  1. git add -A ; git commit -m 'v$Version' ; git push"
+Write-Host "Done! CI will build, attest, and create the release."
+Write-Host "  https://github.com/moozhu/dsh-obsidian/actions"
