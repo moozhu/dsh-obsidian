@@ -7715,7 +7715,7 @@ var DshView = class extends import_obsidian.ItemView {
         });
         link.setAttr("target", "_blank");
         link.setAttr("rel", "noopener");
-        status.createEl("div", { text: "\u5B89\u88C5\u540E\u91CD\u65B0\u6253\u5F00\u9762\u677F\u5373\u53EF\u3002" });
+        status.createDiv({ text: "\u5B89\u88C5\u540E\u91CD\u65B0\u6253\u5F00\u9762\u677F\u5373\u53EF\u3002" });
       }
       this.plugin.updateStatusBar("\u542F\u52A8\u5931\u8D25");
       new import_obsidian.Notice(`DSH \u542F\u52A8\u5931\u8D25\uFF1A${message}`, 1e4);

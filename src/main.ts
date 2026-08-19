@@ -573,7 +573,7 @@ class DshView extends ItemView {
         });
         link.setAttr("target", "_blank");
         link.setAttr("rel", "noopener");
-        status.createEl("div", { text: "安装后重新打开面板即可。" });
+        status.createDiv({ text: "安装后重新打开面板即可。" });
       }
       this.plugin.updateStatusBar("启动失败");
       new Notice(`DSH 启动失败：${message}`, 10000);
