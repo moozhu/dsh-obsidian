@@ -65,6 +65,26 @@ Settings → Community plugins → Browse → search "DSH for Obsidian" → Inst
 | Re-open vault B | Re-launches on the same port; history is still there |
 | Port occupied / manual DSH running | Only manages its own instances; finds a free port instead of touching manual ones |
 
+## Shared model configuration (one-time setup, used everywhere)
+
+Your **main DSH** (e.g. the desktop instance at `http://127.0.0.1:3080`, whose data lives in `~/.dsh`) is the **single source of truth** for model *infrastructure*. On every vault instance startup, the plugin one-way syncs from the main instance to that vault:
+
+- **LLM providers** (`llm-pi-ai` and `llm-deepseek` namespaces in `settings.yaml`: base URLs, model lists, routes)
+- **API credentials** (`.credentials.yaml`)
+
+So if you add a new model vendor or API key in the 3080 instance, just open (or reopen) any vault panel and it's available there too — **no need to re-add it per vault**. The sync runs on every panel open, so even an already-running instance picks up the new vendor/key (DSH hot-reloads `settings.yaml`).
+
+**Not synced on purpose** — each vault keeps its own choice:
+
+- **Default model route** (`agent-default-model`): e.g. main uses DeepSeek, a vault uses GPT/MiMo — the vault keeps its own default.
+- **Search model** (`web-search-deepseek`): each vault may use its own search model.
+
+How conflicts are handled (read carefully):
+
+- **Union merge** for provider / credential dictionaries: an entry that exists only in a vault is **kept**; an entry on both sides is overridden by the main instance's version; an entry added on the main side is added to the vault.
+- Direction is **main → vault, one-way**: changes you make *inside* a vault's DSH are **not** written back to the main instance (prevents multiple ends from overwriting each other). If you want a vendor/key available everywhere, add it in the main/desktop instance.
+- **Plugin systems (`profiles` / node_modules) are NOT synced** — each vault keeps its own plugin set, so different vaults can use different plugins freely.
+
 ## DSH kernel upgrade
 
 - Zero coupling to DSH internals: upgrade DSH → restart the panel and you're on the new kernel. **No plugin update needed.**
@@ -82,8 +102,9 @@ Settings → Community plugins → Browse → search "DSH for Obsidian" → Inst
 
 ```powershell
 npm install
-npm run dev      # tsc watch
-npm run build    # build → main.js
+npm run dev       # tsc watch
+npm run typecheck # type-check only
+npm run build     # type-check + esbuild bundle → main.js (bundles the yaml dep)
 ```
 
 ## Release

@@ -40,19 +40,14 @@ cd E:\OneDrive\deepseek\dsh-obsidian
 
 ## 四、提交官方社区商店（审核制，可选）
 
-1. Fork [obsidian-releases](https://github.com/obsidianmd/obsidian-releases) 仓库
-2. 在 `community-plugins.json` 的列表末尾添加：
-   ```json
-   {
-     "id": "dsh-obsidian",
-     "name": "DSH for Obsidian",
-     "author": "moozhu",
-     "description": "Embed DeepSeek Harness Web UI in Obsidian, with one isolated workspace per vault.",
-     "repo": "moozhu/dsh-obsidian"
-   }
-   ```
-3. 发 PR。首次发布需在 PR 说明里注明：**本插件依赖外部程序 Node.js**（与 opencode-obsidian 同类），插件会自动检测并引导安装
-4. 审核通过后，商店安装 + 自动更新（走最新 Release 的 zip + versions.json）
+> 提交走官方目录网站 [community.obsidian.md](https://community.obsidian.md)，**不再是 GitHub PR**。
+> 完整步骤见 [SUBMISSION.md](./SUBMISSION.md)。
+
+1. 登录 [community.obsidian.md](https://community.obsidian.md)，关联 GitHub 账号（`moozhu`）
+2. 添加插件，关联仓库 `moozhu/dsh-obsidian`
+3. 网站读取仓库默认分支 `manifest.json` + 与 `version` 匹配的 GitHub Release，自动审查
+4. 首次发布在提交说明里注明：**本插件依赖外部程序 Node.js**（与 opencode-obsidian 同类），插件会自动检测并引导安装
+5. 审核通过后，商店安装 + 自动更新（走最新 Release 的 zip + versions.json）
 
 ## 版本号规则
 

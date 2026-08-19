@@ -11,10 +11,11 @@ import {
 } from "obsidian";
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { get } from "http";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
+import { parseDocument, Document } from "yaml";
 
 /**
  * DSH 实例管理 + 设置模型。
@@ -213,23 +214,128 @@ function vaultHome(vaultPath: string): string {
 }
 
 /**
- * 首次启动时把主 .dsh 的凭据和设置继承到库专属目录，
- * 免去每个库重复配置 API 密钥与搜索网关。
+ * 从主 .dsh 单向同步"模型基础设施"配置到库专属目录。
+ *
+ * 设计取舍（为什么单向、只同步模型供应商与凭据）：
+ * - 只同步"基础设施"：模型供应商（LLM provider 路由：baseURL、模型列表、兼容配置等）
+ *   和 API 凭据。这些是配置一次就该处处可用的东西——在主实例（如桌面版 3080）
+ *   添加一个供应商 / API key 后，各库的 DSH 也能直接用，不必每个库重复配置。
+ * - **不同步默认模型路由（agent-default-model）与搜索模型（web-search-deepseek）**：
+ *   每个库想用哪个模型作为默认（如主实例用 deepseek、某库用 gpt/mimo）是库自己的
+ *   选择，不应被主实例覆盖。
+ * - 对 provider 这类字典采用"合并（union）"而非"整体替换"：主实例有、库没有的
+ *   会被补进来；库实例单独添加的 provider/凭据予以保留；同名项以主为准覆盖。
+ *   这样既同步了新增，又不会误删任一实例里特有的配置。
+ * - 方向固定为 主 → 库 单向：主实例是模型配置的权威源。库实例里的模型改动
+ *   不会回写主实例（避免多端互相覆盖造成混乱；这一取舍写入 README）。
+ * - 插件体系（profiles 目录）不在此同步范围内：不同库想用不同插件时互不干扰。
+ *
+ * 该函数在每次启动实例前调用，因此在主实例新增供应商/密钥后，重启/重开任一库面板即可同步。
  */
-function inheritMainConfig(vaultHomePath: string): void {
-  if (existsSync(join(vaultHomePath, "settings.yaml"))) return; // 已初始化过，不覆盖
+function syncModelConfig(vaultHomePath: string): void {
   const mainHome = process.env.DSH_HOME ?? join(homedir(), ".dsh");
   mkdirSync(vaultHomePath, { recursive: true });
-  for (const file of [".credentials.yaml", "settings.yaml"]) {
-    const source = join(mainHome, file);
-    if (existsSync(source)) {
-      try {
-        copyFileSync(source, join(vaultHomePath, file));
-      } catch {
-        // 继承失败不阻塞启动，用户可在库实例里手动配置
-      }
+
+  // 1) 凭据：并集合并（主新增的 key 补进库，库独有的 key 保留，同名以主覆盖）。
+  const mainCred = join(mainHome, ".credentials.yaml");
+  const vaultCred = join(vaultHomePath, ".credentials.yaml");
+  if (existsSync(mainCred)) {
+    try {
+      const mergedCred = mergeYamlFile(mainCred, vaultCred);
+      writeFileSync(vaultCred, mergedCred, "utf8");
+    } catch {
+      // 凭证同步失败不阻塞启动，用户可在库实例里手动配置
     }
   }
+
+  // 2) 设置：只把白名单内的"模型供应商"命名空间以主为准合并进库的 settings.yaml，
+  //    保留库实例里其它命名空间、独有 provider 与默认模型选择。
+  const MODEL_NAMESPACES = ["llm-pi-ai", "llm-deepseek"] as const;
+
+  const mainSettings = join(mainHome, "settings.yaml");
+  const vaultSettings = join(vaultHomePath, "settings.yaml");
+  if (!existsSync(mainSettings)) return; // 主实例没有设置可同步
+
+  let mainDoc: Document;
+  try {
+    mainDoc = parseDocument(readFileSync(mainSettings, "utf8"));
+    if (mainDoc.errors.length > 0 || mainDoc.toJS() == null) return;
+  } catch {
+    return; // 主设置解析失败就跳过，保留库现有配置
+  }
+
+  const vaultDoc = existsSync(vaultSettings) ? parseDocument(readFileSync(vaultSettings, "utf8")) : new Document({});
+  const mainRoot = mainDoc.toJS() as Record<string, unknown> | null;
+  const vaultRoot = vaultDoc.toJS() as Record<string, unknown> | null;
+  if (mainRoot == null) return;
+
+  let changed = false;
+  for (const ns of MODEL_NAMESPACES) {
+    const mainVal = mainRoot[ns]; // 主命名空间的纯 JS 值
+    if (mainVal === undefined) continue;
+    const vaultVal = vaultRoot?.[ns];
+    const merged = mergeModelSection(vaultVal, mainVal); // 主优先覆盖，库独有保留
+    vaultDoc.setIn([ns], merged);
+    changed = true;
+  }
+  if (changed) {
+    try {
+      writeFileSync(vaultSettings, vaultDoc.toString({}), "utf8");
+    } catch {
+      // 写入失败不阻塞启动
+    }
+  }
+}
+
+/**
+ * 合并两个 YAML 文件：以 source 为准覆盖 target，但对纯对象做逐键合并，
+ * 保留 target 里 source 没有的键。source 文件不存在时返回 target 原内容；
+ * target 不存在时返回 source 序列化结果。
+ */
+function mergeYamlFile(sourcePath: string, targetPath: string): string {
+  const sourceDoc = parseDocument(readFileSync(sourcePath, "utf8"));
+  if (sourceDoc.errors.length > 0) {
+    // 源文件损坏则保留目标文件现状
+    return existsSync(targetPath) ? readFileSync(targetPath, "utf8") : "";
+  }
+  if (!existsSync(targetPath)) return sourceDoc.toString({});
+  const targetDoc = parseDocument(readFileSync(targetPath, "utf8"));
+  const sourceRoot = sourceDoc.toJS();
+  const targetRoot = targetDoc.toJS();
+  if (
+    sourceRoot !== null &&
+    typeof sourceRoot === "object" &&
+    !Array.isArray(sourceRoot) &&
+    targetRoot !== null &&
+    typeof targetRoot === "object" &&
+    !Array.isArray(targetRoot)
+  ) {
+    const merged = mergeModelSection(targetRoot, sourceRoot);
+    targetDoc.setIn([], merged);
+    return targetDoc.toString({});
+  }
+  return sourceDoc.toString({});
+}
+
+/**
+ * 深度合并一个模型命名空间：以 source(main) 为准覆盖 target(vault)，
+ * 但对纯对象做逐键合并，保留 target 里 source 没有的键（如库独有的 provider/模型）。
+ * 数组与标量整体以 source 为准替换。
+ */
+function mergeModelSection(target: unknown, source: unknown): unknown {
+  if (isPlainObject(target) && isPlainObject(source)) {
+    const out: Record<string, unknown> = { ...target };
+    for (const [key, value] of Object.entries(source)) {
+      out[key] = mergeModelSection(out[key], value);
+    }
+    return out;
+  }
+  return source; // 非对象（标量/数组/缺失）整体以主为准
+}
+
+/** 是否是普通对象（非 null、非数组）。 */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface WorkspaceStorage {
@@ -369,6 +475,10 @@ class InstanceManager {
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
 
+    // 0. 每次打开面板都同步主实例的模型供应商/凭据（无论实例是否已在运行）。
+    //    运行中的 DSH 会在 settings.yaml 写回后热重载，下次请求即可用上新配置。
+    syncModelConfig(vaultHome(vaultPath));
+
     // 1. 复用：之前记录过且端口上确实有 DSH 在响应
     if (record && (await probeDsh(record.port))) {
       onState?.(`运行中 @ ${record.port}`);
@@ -387,9 +497,8 @@ class InstanceManager {
       port++;
     }
 
-    // 4. 准备库专属数据目录（首次继承主配置 + 种入库根工作区），启动 + 等待就绪
+    // 4. 准备库专属数据目录（种入库根工作区），启动 + 等待就绪
     const bootCommand = resolveBootCommand(settings, port);
-    inheritMainConfig(vaultHome(vaultPath));
     seedWorkspace(vaultHome(vaultPath), vaultPath);
     onState?.(`正在启动 @ ${port} ...`);
     const pid = spawnDsh(bootCommand, vaultPath);
