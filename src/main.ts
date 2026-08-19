@@ -673,7 +673,6 @@ class DshSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName("DSH for Vaults").setHeading();
     containerEl.createEl("p", {
       text: "在 Obsidian 中嵌入 DeepSeek Harness Web UI，按库（vault）管理独立的工作区与会话。",
     });

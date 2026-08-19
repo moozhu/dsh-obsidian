@@ -7790,7 +7790,6 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("DSH for Vaults").setHeading();
     containerEl.createEl("p", {
       text: "\u5728 Obsidian \u4E2D\u5D4C\u5165 DeepSeek Harness Web UI\uFF0C\u6309\u5E93\uFF08vault\uFF09\u7BA1\u7406\u72EC\u7ACB\u7684\u5DE5\u4F5C\u533A\u4E0E\u4F1A\u8BDD\u3002"
     });
