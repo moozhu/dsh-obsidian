@@ -7492,7 +7492,8 @@ function syncModelConfig(vaultHomePath) {
   if ((0, import_fs.existsSync)(mainCred)) {
     try {
       const mergedCred = mergeYamlFile(mainCred, vaultCred);
-      (0, import_fs.writeFileSync)(vaultCred, mergedCred, "utf8");
+      const sanitized = sanitizeCredentialKeys(mergedCred);
+      (0, import_fs.writeFileSync)(vaultCred, sanitized, "utf8");
     } catch {
     }
   }
@@ -7542,6 +7543,22 @@ function mergeYamlFile(sourcePath, targetPath) {
     return targetDoc.toString({});
   }
   return sourceDoc.toString({});
+}
+function sanitizeCredentialKeys(yamlStr) {
+  let doc;
+  try {
+    doc = (0, import_yaml.parseDocument)(yamlStr);
+  } catch {
+    return yamlStr;
+  }
+  if (doc.errors.length > 0) return yamlStr;
+  const ALLOWED = /* @__PURE__ */ new Set(["version", "refs", "records"]);
+  const root = doc.toJS();
+  if (root === null || typeof root !== "object" || Array.isArray(root)) return yamlStr;
+  for (const key of Object.keys(root)) {
+    if (!ALLOWED.has(key)) doc.delete(key);
+  }
+  return doc.toString({});
 }
 function mergeModelSection(target, source) {
   if (isPlainObject(target) && isPlainObject(source)) {
@@ -7611,16 +7628,31 @@ function spawnDsh(bootCommand, vaultPath) {
     shell: true,
     cwd: vaultPath,
     windowsHide: true,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
       DSH_HOME: vaultHome(vaultPath)
     }
   });
-  child.on("error", () => {
+  let log = "";
+  const collect = (d) => {
+    log += d.toString();
+  };
+  child.stdout?.on("data", collect);
+  child.stderr?.on("data", collect);
+  child.on("error", (err) => {
+    log += `
+[spawn error] ${err.message}`;
   });
+  child.on("exit", (code, signal) => {
+    if (code !== null && code !== 0) {
+      log += `
+[dsh exited code=${code}${signal ? ` signal=${signal}` : ""}]`;
+    }
+  });
+  child.__getLog = () => log;
   child.unref();
-  return child.pid;
+  return child;
 }
 function stopProcess(pid) {
   (0, import_child_process.spawn)("taskkill", ["/pid", String(pid), "/T", "/F"], {
@@ -7660,8 +7692,22 @@ var InstanceManager = class {
     const bootCommand = resolveBootCommand(settings, port);
     seedWorkspace(vaultHome(vaultPath), vaultPath);
     onState?.(`\u6B63\u5728\u542F\u52A8 @ ${port} ...`);
-    const pid = spawnDsh(bootCommand, vaultPath);
-    await waitForDsh(port);
+    const child = spawnDsh(bootCommand, vaultPath);
+    const pid = child?.pid;
+    try {
+      await waitForDsh(port);
+    } catch (e) {
+      if (child?.pid) stopProcess(child.pid);
+      const log = child?.__getLog?.() ?? "";
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `${msg}
+
+--- dsh \u542F\u52A8\u8F93\u51FA\uFF08\u672B\u5C3E 3000 \u5B57\u7B26\uFF09---
+${log.slice(-3e3) || "\uFF08\u65E0\u8F93\u51FA\uFF09"}
+\u63D0\u793A\uFF1A\u53EF\u5728\u7EC8\u7AEF\u8FDB\u5165\u5E93\u76EE\u5F55\u6267\u884C  npx --yes @deepseek-ai/dsh web --port <\u7AEF\u53E3>  \u67E5\u770B\u5B8C\u6574\u62A5\u9519\u3002`
+      );
+    }
     settings.instances[vaultPath] = { port, pid };
     await this.save();
     onState?.(`\u8FD0\u884C\u4E2D @ ${port}`);

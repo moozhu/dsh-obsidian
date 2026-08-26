@@ -1,7 +1,7 @@
 {
     "id":  "dsh-ob",
     "name":  "DSH for Vaults",
-    "version":  "0.1.3",
+    "version":  "0.1.4",
     "minAppVersion":  "1.4.0",
     "description":  "Embeds the DeepSeek Harness web UI, with one isolated per-vault workspace and AI sessions.",
     "author":  "moozhu",

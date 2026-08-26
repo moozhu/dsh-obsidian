@@ -9,7 +9,7 @@ import {
   Setting,
   WorkspaceLeaf,
 } from "obsidian";
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { get } from "http";
@@ -242,7 +242,10 @@ function syncModelConfig(vaultHomePath: string): void {
   if (existsSync(mainCred)) {
     try {
       const mergedCred = mergeYamlFile(mainCred, vaultCred);
-      writeFileSync(vaultCred, mergedCred, "utf8");
+      // dsh 凭据只认 version / refs / records 三个顶层键；
+      // 老式扁平键（如 DEEPSEEK_API_KEY）会导致 vault 实例启动崩溃，必须剔除。
+      const sanitized = sanitizeCredentialKeys(mergedCred);
+      writeFileSync(vaultCred, sanitized, "utf8");
     } catch {
       // 凭证同步失败不阻塞启动，用户可在库实例里手动配置
     }
@@ -315,6 +318,28 @@ function mergeYamlFile(sourcePath: string, targetPath: string): string {
     return targetDoc.toString({});
   }
   return sourceDoc.toString({});
+}
+
+/**
+ * 只保留 dsh 凭据允许的顶层键（version / refs / records），
+ * 丢弃其它（如老式扁平 DEEPSEEK_API_KEY），避免 vault 实例启动崩溃。
+ * dsh-credentials-local 的校验器（lib/index.js）只允许这三个顶层键。
+ */
+function sanitizeCredentialKeys(yamlStr: string): string {
+  let doc: Document;
+  try {
+    doc = parseDocument(yamlStr);
+  } catch {
+    return yamlStr;
+  }
+  if (doc.errors.length > 0) return yamlStr;
+  const ALLOWED = new Set(["version", "refs", "records"]);
+  const root = doc.toJS() as Record<string, unknown> | null;
+  if (root === null || typeof root !== "object" || Array.isArray(root)) return yamlStr;
+  for (const key of Object.keys(root)) {
+    if (!ALLOWED.has(key)) doc.delete(key);
+  }
+  return doc.toString({});
 }
 
 /**
@@ -419,23 +444,40 @@ function resolveBootCommand(settings: DshSettings, port: number): string {
   return `${npxCommand} || "${detected}" web --port ${port}`;
 }
 
-/** 启动 DSH 子进程（cwd = 库根目录，DSH_HOME = 库专属数据目录），返回 pid。 */
-function spawnDsh(bootCommand: string, vaultPath: string): number | undefined {
+/**
+ * 启动 DSH 子进程（cwd = 库根目录，DSH_HOME = 库专属数据目录）。
+ * 关键修正：不再用 stdio:"ignore" 吞掉输出，而是捕获 stdout/stderr，
+ * 这样启动失败时（端口被占、依赖缺失、npx 拉取失败等）能在面板里看到真实报错，
+ * 而不是只得到一个笼统的"超时"。返回的 ChildProcess 上挂了 __getLog() 供超时兜底读取。
+ */
+function spawnDsh(bootCommand: string, vaultPath: string): ChildProcess | undefined {
   const child = spawn(bootCommand, {
     shell: true,
     cwd: vaultPath,
     windowsHide: true,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
       DSH_HOME: vaultHome(vaultPath),
     },
   });
-  child.on("error", () => {
-    // 启动失败（如 npx 不存在）由就绪轮询超时兜底提示
+  let log = "";
+  const collect = (d: Buffer | string) => {
+    log += d.toString();
+  };
+  child.stdout?.on("data", collect);
+  child.stderr?.on("data", collect);
+  child.on("error", (err) => {
+    log += `\n[spawn error] ${err.message}`;
   });
+  child.on("exit", (code, signal) => {
+    if (code !== null && code !== 0) {
+      log += `\n[dsh exited code=${code}${signal ? ` signal=${signal}` : ""}]`;
+    }
+  });
+  (child as unknown as { __getLog: () => string }).__getLog = () => log;
   child.unref();
-  return child.pid;
+  return child;
 }
 
 /** 停止进程及其子进程树。 */
@@ -501,8 +543,20 @@ class InstanceManager {
     const bootCommand = resolveBootCommand(settings, port);
     seedWorkspace(vaultHome(vaultPath), vaultPath);
     onState?.(`正在启动 @ ${port} ...`);
-    const pid = spawnDsh(bootCommand, vaultPath);
-    await waitForDsh(port);
+    const child = spawnDsh(bootCommand, vaultPath);
+    const pid = child?.pid;
+    try {
+      await waitForDsh(port);
+    } catch (e) {
+      // 启动失败：杀掉残留子进程树，避免留下孤儿 dsh 占着端口（这也是反复超时的一大根因）
+      if (child?.pid) stopProcess(child.pid);
+      const log = (child as unknown as { __getLog?: () => string } | undefined)?.__getLog?.() ?? "";
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `${msg}\n\n--- dsh 启动输出（末尾 3000 字符）---\n${log.slice(-3000) || "（无输出）"}\n` +
+          "提示：可在终端进入库目录执行  npx --yes @deepseek-ai/dsh web --port <端口>  查看完整报错。"
+      );
+    }
 
     settings.instances[vaultPath] = { port, pid };
     await this.save();
