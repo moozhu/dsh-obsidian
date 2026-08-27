@@ -430,18 +430,23 @@ function seedWorkspace(vaultHomePath: string, vaultPath: string): void {
 /**
  * 生成启动命令：
  * 1. 用户手动填了 dsh 路径 → 锁定用该版本（不自动升级）
- * 2. 否则 npx --yes 优先：每次启动检查 registry，官方发新版自动跟随
- * 3. 检测到本地缓存（离线可用）作为 npx 失败时的兜底
+ * 2. 否则本地缓存（npm 全局 / npx 缓存）优先：秒级启动、离线可用
+ * 3. 无本地缓存时才 npx --yes 在线安装
+ *
+ * 本地优先的原因：npx 冷安装要实时拉取整棵依赖树，慢网络下耗时可达数分钟
+ * 且默认日志级别下无任何输出；若把 npx 放在 `A || B` 的 A 位，"挂起"不等于
+ * "失败"，本地兜底永远没机会执行，表现为启动超时无输出。
+ * npx 对已缓存的包本就不会主动检查更新，因此本地优先不损失自动升级能力。
  */
-function resolveBootCommand(settings: DshSettings, port: number): string {
+function resolveBootCommand(
+  settings: DshSettings,
+  port: number
+): { command: string; npxOnly: boolean } {
   const custom = settings.dshCommand.trim();
-  if (custom) return `"${custom}" web --port ${port}`;
-  const npxCommand = `npx --yes @deepseek-ai/dsh web --port ${port}`;
+  if (custom) return { command: `"${custom}" web --port ${port}`, npxOnly: false };
   const detected = detectDshCommand();
-  if (!detected) return npxCommand;
-  // 有本地缓存时：正常走 npx（自动升级）；若 npx 不可用（如离线），fallback 脚本会在下一层处理。
-  // 这里优先 npx，保证官方新版本能自动跟上。
-  return `${npxCommand} || "${detected}" web --port ${port}`;
+  if (detected) return { command: `"${detected}" web --port ${port}`, npxOnly: false };
+  return { command: `npx --yes @deepseek-ai/dsh web --port ${port}`, npxOnly: true };
 }
 
 /**
@@ -540,13 +545,14 @@ class InstanceManager {
     }
 
     // 4. 准备库专属数据目录（种入库根工作区），启动 + 等待就绪
-    const bootCommand = resolveBootCommand(settings, port);
+    const { command: bootCommand, npxOnly } = resolveBootCommand(settings, port);
     seedWorkspace(vaultHome(vaultPath), vaultPath);
     onState?.(`正在启动 @ ${port} ...`);
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
     try {
-      await waitForDsh(port);
+      // 本地副本通常十几秒就绪；npx 冷安装要拉整棵依赖树，给足时间避免误杀
+      await waitForDsh(port, npxOnly ? 300_000 : 120_000);
     } catch (e) {
       // 启动失败：杀掉残留子进程树，避免留下孤儿 dsh 占着端口（这也是反复超时的一大根因）
       if (child?.pid) stopProcess(child.pid);

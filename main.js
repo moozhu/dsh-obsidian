@@ -7617,11 +7617,10 @@ function seedWorkspace(vaultHomePath, vaultPath) {
 }
 function resolveBootCommand(settings, port) {
   const custom = settings.dshCommand.trim();
-  if (custom) return `"${custom}" web --port ${port}`;
-  const npxCommand = `npx --yes @deepseek-ai/dsh web --port ${port}`;
+  if (custom) return { command: `"${custom}" web --port ${port}`, npxOnly: false };
   const detected = detectDshCommand();
-  if (!detected) return npxCommand;
-  return `${npxCommand} || "${detected}" web --port ${port}`;
+  if (detected) return { command: `"${detected}" web --port ${port}`, npxOnly: false };
+  return { command: `npx --yes @deepseek-ai/dsh web --port ${port}`, npxOnly: true };
 }
 function spawnDsh(bootCommand, vaultPath) {
   const child = (0, import_child_process.spawn)(bootCommand, {
@@ -7689,13 +7688,13 @@ var InstanceManager = class {
       if (!await probeAnyHttp(port)) break;
       port++;
     }
-    const bootCommand = resolveBootCommand(settings, port);
+    const { command: bootCommand, npxOnly } = resolveBootCommand(settings, port);
     seedWorkspace(vaultHome(vaultPath), vaultPath);
     onState?.(`\u6B63\u5728\u542F\u52A8 @ ${port} ...`);
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
     try {
-      await waitForDsh(port);
+      await waitForDsh(port, npxOnly ? 3e5 : 12e4);
     } catch (e) {
       if (child?.pid) stopProcess(child.pid);
       const log = child?.__getLog?.() ?? "";
