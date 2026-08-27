@@ -11,7 +11,7 @@ import {
 } from "obsidian";
 import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
 import { get } from "http";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
@@ -49,6 +49,8 @@ interface DshSettings {
   viewLocation: "right-sidebar" | "left-sidebar" | "tab";
   /** vaultPath -> 实例记录（端口/pid），持久化在插件 data.json */
   instances: Record<string, InstanceRecord>;
+  /** 上次后台版本检查时间戳（24h 节流） */
+  lastUpdateCheck: number;
 }
 
 const DEFAULT_SETTINGS: DshSettings = {
@@ -58,6 +60,7 @@ const DEFAULT_SETTINGS: DshSettings = {
   stopOnUnload: true,
   viewLocation: "right-sidebar",
   instances: {},
+  lastUpdateCheck: 0,
 };
 
 /** 启动错误：nodeMissing 时面板额外展示 Node.js 下载入口。 */
@@ -161,32 +164,121 @@ function probeNode(timeoutMs = 8000): Promise<boolean> {
 
 //#region 可执行文件探测
 
-/**
- * 自动探测 dsh 可执行文件（Windows）：
- * 1. npm 全局安装 %APPDATA%\npm\dsh.cmd
- * 2. npx 缓存 %LOCALAPPDATA%\npm-cache\_npx\<hash>\node_modules\.bin\dsh.cmd
- * 都找不到返回 null。
- */
-function detectDshCommand(): string | null {
-  const candidates: string[] = [];
-  const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
-  candidates.push(join(appData, "npm", "dsh.cmd"));
+interface DshInstall {
+  cmd: string;
+  version: string | null;
+}
 
+/** 后台更新目录：检查到新版时装到这里，与全局/npx 缓存并列参与版本择优。 */
+function managedDshDir(): string {
   const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+  return join(localAppData, "dsh-obsidian", "dsh-latest");
+}
+
+function readDshVersion(pkgJsonPath: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { version?: string };
+    return typeof parsed.version === "string" ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 枚举所有本地 dsh 副本及版本，优先级顺序：
+ * npm 全局安装 → 管理目录（后台更新）→ npx 缓存各哈希/手动目录。
+ */
+function detectDshInstalls(): DshInstall[] {
+  const installs: DshInstall[] = [];
+  const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
+  const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+
+  const globalCmd = join(appData, "npm", "dsh.cmd");
+  if (existsSync(globalCmd)) {
+    installs.push({
+      cmd: globalCmd,
+      version: readDshVersion(join(appData, "npm", "node_modules", "@deepseek-ai", "dsh", "package.json")),
+    });
+  }
+
+  const managedRoot = managedDshDir();
+  const managedCmd = join(managedRoot, "node_modules", ".bin", "dsh.cmd");
+  if (existsSync(managedCmd)) {
+    installs.push({
+      cmd: managedCmd,
+      version: readDshVersion(join(managedRoot, "node_modules", "@deepseek-ai", "dsh", "package.json")),
+    });
+  }
+
   const npxRoot = join(localAppData, "npm-cache", "_npx");
   if (existsSync(npxRoot)) {
     try {
       for (const sub of readdirSync(npxRoot)) {
-        candidates.push(join(npxRoot, sub, "node_modules", ".bin", "dsh.cmd"));
+        const root = join(npxRoot, sub);
+        const cmd = join(root, "node_modules", ".bin", "dsh.cmd");
+        if (existsSync(cmd)) {
+          installs.push({
+            cmd,
+            version: readDshVersion(join(root, "node_modules", "@deepseek-ai", "dsh", "package.json")),
+          });
+        }
       }
     } catch {
-      // 目录不可读时忽略，走下一个候选
+      // 目录不可读时忽略
     }
   }
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+  return installs;
+}
+
+function parseSemver(v: string): { nums: [number, number, number]; pre: string[] } | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(v);
+  if (!m) return null;
+  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split(".") : [] };
+}
+
+/** semver 比较（含 -rc.x 预发布：正式版 > 预发布）。无法解析视为相等。 */
+function compareSemver(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (pa.nums[i] !== pb.nums[i]) return pa.nums[i] - pb.nums[i];
   }
-  return null;
+  if (pa.pre.length === 0 && pb.pre.length > 0) return 1;
+  if (pa.pre.length > 0 && pb.pre.length === 0) return -1;
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i++) {
+    const xa = pa.pre[i];
+    const xb = pb.pre[i];
+    if (xa === undefined) return -1;
+    if (xb === undefined) return 1;
+    const na = Number(xa);
+    const nb = Number(xb);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) {
+      if (na !== nb) return na - nb;
+    } else if (xa !== xb) {
+      return xa < xb ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/** 版本最高者胜；版本缺失让位于有版本者；同版本按探测优先级（先出现者）。 */
+function pickBestInstall(installs: DshInstall[]): DshInstall | null {
+  let best: DshInstall | null = null;
+  for (const cur of installs) {
+    if (!best) {
+      best = cur;
+      continue;
+    }
+    if (cur.version && !best.version) {
+      best = cur;
+      continue;
+    }
+    if (cur.version && best.version && compareSemver(cur.version, best.version) > 0) {
+      best = cur;
+    }
+  }
+  return best;
 }
 
 //#endregion
@@ -444,8 +536,8 @@ function resolveBootCommand(
 ): { command: string; npxOnly: boolean } {
   const custom = settings.dshCommand.trim();
   if (custom) return { command: `"${custom}" web --port ${port}`, npxOnly: false };
-  const detected = detectDshCommand();
-  if (detected) return { command: `"${detected}" web --port ${port}`, npxOnly: false };
+  const best = pickBestInstall(detectDshInstalls());
+  if (best) return { command: `"${best.cmd}" web --port ${port}`, npxOnly: false };
   return { command: `npx --yes @deepseek-ai/dsh web --port ${port}`, npxOnly: true };
 }
 
@@ -495,6 +587,132 @@ function stopProcess(pid: number): void {
 
 //#endregion
 
+//#region 后台版本检查与更新
+
+const UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1000;
+let updateCheckInFlight = false;
+
+function runNpm(args: string[], timeoutMs: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn(`npm ${args.join(" ")}`, {
+      shell: true,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    child.stdout?.on("data", (d: Buffer | string) => (out += d.toString()));
+    const timer = window.setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // 忽略
+      }
+      resolve(null);
+    }, timeoutMs);
+    child.on("error", () => {
+      window.clearTimeout(timer);
+      resolve(null);
+    });
+    child.on("close", (code) => {
+      window.clearTimeout(timer);
+      resolve(code === 0 ? out.trim() : null);
+    });
+  });
+}
+
+/**
+ * 查询 registry 最新版。先走用户 npm 配置（代理/镜像）；
+ * 配置链路失败（如本地代理软件没启动，连接挂死）时直连兜底。
+ */
+async function fetchLatestVersion(): Promise<string | null> {
+  const viaConfig = await runNpm(["view", "@deepseek-ai/dsh", "version"], 15_000);
+  if (viaConfig) return viaConfig;
+  return runNpm(
+    ["--proxy", "null", "--https-proxy", "null", "view", "@deepseek-ai/dsh", "version"],
+    15_000
+  );
+}
+
+/** 后台安装 @latest 到临时目录，校验版本后提升为管理目录；失败不留半成品。 */
+async function installLatestToManaged(latest: string): Promise<boolean> {
+  const target = managedDshDir();
+  const tmp = `${target}.tmp`;
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {
+    // 忽略
+  }
+  mkdirSync(tmp, { recursive: true });
+  writeFileSync(join(tmp, "package.json"), JSON.stringify({ name: "dsh-latest", private: true }), "utf8");
+  const installArgs = [
+    "install",
+    "--prefix",
+    `"${tmp}"`,
+    `@deepseek-ai/dsh@${latest}`,
+    "--no-audit",
+    "--no-fund",
+    "--loglevel=error",
+  ];
+  const ok =
+    (await runNpm(installArgs, 120_000)) !== null ||
+    (await runNpm(["--proxy", "null", "--https-proxy", "null", ...installArgs], 600_000)) !== null;
+  const installedVersion = readDshVersion(join(tmp, "node_modules", "@deepseek-ai", "dsh", "package.json"));
+  const valid = ok && installedVersion === latest && existsSync(join(tmp, "node_modules", ".bin", "dsh.cmd"));
+  if (!valid) {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // 忽略
+    }
+    return false;
+  }
+  try {
+    rmSync(target, { recursive: true, force: true });
+    renameSync(tmp, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 版本检查主流程：查最新版 → 与本地最高版本比较 → 有新版才后台下载。
+ * force=true（设置页手动按钮）时通过 onStatus 汇报每一步；自动检查静默。
+ */
+async function runUpdateCheck(opts: {
+  force?: boolean;
+  onStatus?: (s: string) => void;
+}): Promise<void> {
+  if (updateCheckInFlight) {
+    opts.onStatus?.("已有检查在进行中，请稍候");
+    return;
+  }
+  updateCheckInFlight = true;
+  const notify = (s: string) => {
+    if (opts.force) opts.onStatus?.(s);
+  };
+  try {
+    notify("正在检查 dsh 最新版本 ...");
+    const latest = await fetchLatestVersion();
+    if (!latest) {
+      notify("检查失败：无法访问 registry（网络/代理问题），保持当前版本");
+      return;
+    }
+    const best = pickBestInstall(detectDshInstalls());
+    if (best?.version && compareSemver(latest, best.version) <= 0) {
+      notify(`已是最新（本地 ${best.version}）`);
+      return;
+    }
+    notify(`发现新版 ${latest}，后台下载中（不阻塞使用）...`);
+    const ok = await installLatestToManaged(latest);
+    notify(ok ? `dsh ${latest} 已就绪，下次打开面板自动启用` : "下载失败，保持当前版本，下次再试");
+  } finally {
+    updateCheckInFlight = false;
+  }
+}
+
+//#endregion
+
 /**
  * 实例解析层：负责"哪个库 -> 哪个端口/实例"。
  * 每库一实例策略：vaultPath 哈希映射到端口，冲突上移；
@@ -525,6 +743,16 @@ class InstanceManager {
     // 0. 每次打开面板都同步主实例的模型供应商/凭据（无论实例是否已在运行）。
     //    运行中的 DSH 会在 settings.yaml 写回后热重载，下次请求即可用上新配置。
     syncModelConfig(vaultHome(vaultPath));
+
+    // 0.5 后台版本检查：24h 节流、不阻塞启动；手动锁定路径的用户不参与自动更新。
+    if (
+      !settings.dshCommand.trim() &&
+      Date.now() - settings.lastUpdateCheck > UPDATE_CHECK_INTERVAL_MS
+    ) {
+      settings.lastUpdateCheck = Date.now();
+      void this.save();
+      void runUpdateCheck({});
+    }
 
     // 1. 复用：之前记录过且端口上确实有 DSH 在响应
     if (record && (await probeDsh(record.port))) {
@@ -745,12 +973,28 @@ class DshSettingTab extends PluginSettingTab {
       )
       .addText((text) =>
         text
-          .setPlaceholder(detectDshCommand() ?? "自动探测 / npx 在线安装")
+          .setPlaceholder(pickBestInstall(detectDshInstalls())?.cmd ?? "自动探测 / npx 在线安装")
           .setValue(this.plugin.settings.dshCommand)
           .onChange(async (value) => {
             this.plugin.settings.dshCommand = value.trim();
             await this.plugin.saveSettings();
           })
+      );
+
+    const best = pickBestInstall(detectDshInstalls());
+    const updateSetting = new Setting(containerEl)
+      .setName("dsh 版本更新")
+      .setDesc(
+        best?.version
+          ? `当前使用本地 ${best.version}。每天后台自动检查一次官方新版，发现新版静默下载、下次打开面板启用。`
+          : "未检测到本地 dsh，首次启动将 npx 在线安装。每天后台自动检查一次官方新版。"
+      )
+      .addButton((btn) =>
+        btn.setButtonText("检查并更新").onClick(async () => {
+          btn.setDisabled(true);
+          await runUpdateCheck({ force: true, onStatus: (s) => updateSetting.setDesc(s) });
+          btn.setDisabled(false);
+        })
       );
 
     new Setting(containerEl)

@@ -7376,7 +7376,8 @@ var DEFAULT_SETTINGS = {
   autoStart: false,
   stopOnUnload: true,
   viewLocation: "right-sidebar",
-  instances: {}
+  instances: {},
+  lastUpdateCheck: 0
 };
 var BootError = class extends Error {
   constructor(message, nodeMissing = false) {
@@ -7454,24 +7455,100 @@ function probeNode(timeoutMs = 8e3) {
     });
   });
 }
-function detectDshCommand() {
-  const candidates = [];
-  const appData = process.env.APPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Roaming");
-  candidates.push((0, import_path.join)(appData, "npm", "dsh.cmd"));
+function managedDshDir() {
   const localAppData = process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local");
+  return (0, import_path.join)(localAppData, "dsh-obsidian", "dsh-latest");
+}
+function readDshVersion(pkgJsonPath) {
+  try {
+    const parsed = JSON.parse((0, import_fs.readFileSync)(pkgJsonPath, "utf8"));
+    return typeof parsed.version === "string" ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+function detectDshInstalls() {
+  const installs = [];
+  const appData = process.env.APPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Roaming");
+  const localAppData = process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local");
+  const globalCmd = (0, import_path.join)(appData, "npm", "dsh.cmd");
+  if ((0, import_fs.existsSync)(globalCmd)) {
+    installs.push({
+      cmd: globalCmd,
+      version: readDshVersion((0, import_path.join)(appData, "npm", "node_modules", "@deepseek-ai", "dsh", "package.json"))
+    });
+  }
+  const managedRoot = managedDshDir();
+  const managedCmd = (0, import_path.join)(managedRoot, "node_modules", ".bin", "dsh.cmd");
+  if ((0, import_fs.existsSync)(managedCmd)) {
+    installs.push({
+      cmd: managedCmd,
+      version: readDshVersion((0, import_path.join)(managedRoot, "node_modules", "@deepseek-ai", "dsh", "package.json"))
+    });
+  }
   const npxRoot = (0, import_path.join)(localAppData, "npm-cache", "_npx");
   if ((0, import_fs.existsSync)(npxRoot)) {
     try {
       for (const sub of (0, import_fs.readdirSync)(npxRoot)) {
-        candidates.push((0, import_path.join)(npxRoot, sub, "node_modules", ".bin", "dsh.cmd"));
+        const root = (0, import_path.join)(npxRoot, sub);
+        const cmd = (0, import_path.join)(root, "node_modules", ".bin", "dsh.cmd");
+        if ((0, import_fs.existsSync)(cmd)) {
+          installs.push({
+            cmd,
+            version: readDshVersion((0, import_path.join)(root, "node_modules", "@deepseek-ai", "dsh", "package.json"))
+          });
+        }
       }
     } catch {
     }
   }
-  for (const candidate of candidates) {
-    if ((0, import_fs.existsSync)(candidate)) return candidate;
+  return installs;
+}
+function parseSemver(v) {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(v);
+  if (!m) return null;
+  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split(".") : [] };
+}
+function compareSemver(a, b) {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    if (pa.nums[i] !== pb.nums[i]) return pa.nums[i] - pb.nums[i];
   }
-  return null;
+  if (pa.pre.length === 0 && pb.pre.length > 0) return 1;
+  if (pa.pre.length > 0 && pb.pre.length === 0) return -1;
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i++) {
+    const xa = pa.pre[i];
+    const xb = pb.pre[i];
+    if (xa === void 0) return -1;
+    if (xb === void 0) return 1;
+    const na = Number(xa);
+    const nb = Number(xb);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) {
+      if (na !== nb) return na - nb;
+    } else if (xa !== xb) {
+      return xa < xb ? -1 : 1;
+    }
+  }
+  return 0;
+}
+function pickBestInstall(installs) {
+  let best = null;
+  for (const cur of installs) {
+    if (!best) {
+      best = cur;
+      continue;
+    }
+    if (cur.version && !best.version) {
+      best = cur;
+      continue;
+    }
+    if (cur.version && best.version && compareSemver(cur.version, best.version) > 0) {
+      best = cur;
+    }
+  }
+  return best;
 }
 function hashPath(path) {
   let hash = 0;
@@ -7618,8 +7695,8 @@ function seedWorkspace(vaultHomePath, vaultPath) {
 function resolveBootCommand(settings, port) {
   const custom = settings.dshCommand.trim();
   if (custom) return { command: `"${custom}" web --port ${port}`, npxOnly: false };
-  const detected = detectDshCommand();
-  if (detected) return { command: `"${detected}" web --port ${port}`, npxOnly: false };
+  const best = pickBestInstall(detectDshInstalls());
+  if (best) return { command: `"${best.cmd}" web --port ${port}`, npxOnly: false };
   return { command: `npx --yes @deepseek-ai/dsh web --port ${port}`, npxOnly: true };
 }
 function spawnDsh(bootCommand, vaultPath) {
@@ -7659,6 +7736,106 @@ function stopProcess(pid) {
     stdio: "ignore"
   });
 }
+var UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1e3;
+var updateCheckInFlight = false;
+function runNpm(args, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = (0, import_child_process.spawn)(`npm ${args.join(" ")}`, {
+      shell: true,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let out = "";
+    child.stdout?.on("data", (d) => out += d.toString());
+    const timer = window.setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+      }
+      resolve(null);
+    }, timeoutMs);
+    child.on("error", () => {
+      window.clearTimeout(timer);
+      resolve(null);
+    });
+    child.on("close", (code) => {
+      window.clearTimeout(timer);
+      resolve(code === 0 ? out.trim() : null);
+    });
+  });
+}
+async function fetchLatestVersion() {
+  const viaConfig = await runNpm(["view", "@deepseek-ai/dsh", "version"], 15e3);
+  if (viaConfig) return viaConfig;
+  return runNpm(
+    ["--proxy", "null", "--https-proxy", "null", "view", "@deepseek-ai/dsh", "version"],
+    15e3
+  );
+}
+async function installLatestToManaged(latest) {
+  const target = managedDshDir();
+  const tmp = `${target}.tmp`;
+  try {
+    (0, import_fs.rmSync)(tmp, { recursive: true, force: true });
+  } catch {
+  }
+  (0, import_fs.mkdirSync)(tmp, { recursive: true });
+  (0, import_fs.writeFileSync)((0, import_path.join)(tmp, "package.json"), JSON.stringify({ name: "dsh-latest", private: true }), "utf8");
+  const installArgs = [
+    "install",
+    "--prefix",
+    `"${tmp}"`,
+    `@deepseek-ai/dsh@${latest}`,
+    "--no-audit",
+    "--no-fund",
+    "--loglevel=error"
+  ];
+  const ok = await runNpm(installArgs, 12e4) !== null || await runNpm(["--proxy", "null", "--https-proxy", "null", ...installArgs], 6e5) !== null;
+  const installedVersion = readDshVersion((0, import_path.join)(tmp, "node_modules", "@deepseek-ai", "dsh", "package.json"));
+  const valid = ok && installedVersion === latest && (0, import_fs.existsSync)((0, import_path.join)(tmp, "node_modules", ".bin", "dsh.cmd"));
+  if (!valid) {
+    try {
+      (0, import_fs.rmSync)(tmp, { recursive: true, force: true });
+    } catch {
+    }
+    return false;
+  }
+  try {
+    (0, import_fs.rmSync)(target, { recursive: true, force: true });
+    (0, import_fs.renameSync)(tmp, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function runUpdateCheck(opts) {
+  if (updateCheckInFlight) {
+    opts.onStatus?.("\u5DF2\u6709\u68C0\u67E5\u5728\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u7A0D\u5019");
+    return;
+  }
+  updateCheckInFlight = true;
+  const notify = (s) => {
+    if (opts.force) opts.onStatus?.(s);
+  };
+  try {
+    notify("\u6B63\u5728\u68C0\u67E5 dsh \u6700\u65B0\u7248\u672C ...");
+    const latest = await fetchLatestVersion();
+    if (!latest) {
+      notify("\u68C0\u67E5\u5931\u8D25\uFF1A\u65E0\u6CD5\u8BBF\u95EE registry\uFF08\u7F51\u7EDC/\u4EE3\u7406\u95EE\u9898\uFF09\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C");
+      return;
+    }
+    const best = pickBestInstall(detectDshInstalls());
+    if (best?.version && compareSemver(latest, best.version) <= 0) {
+      notify(`\u5DF2\u662F\u6700\u65B0\uFF08\u672C\u5730 ${best.version}\uFF09`);
+      return;
+    }
+    notify(`\u53D1\u73B0\u65B0\u7248 ${latest}\uFF0C\u540E\u53F0\u4E0B\u8F7D\u4E2D\uFF08\u4E0D\u963B\u585E\u4F7F\u7528\uFF09...`);
+    const ok = await installLatestToManaged(latest);
+    notify(ok ? `dsh ${latest} \u5DF2\u5C31\u7EEA\uFF0C\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u542F\u7528` : "\u4E0B\u8F7D\u5931\u8D25\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\uFF0C\u4E0B\u6B21\u518D\u8BD5");
+  } finally {
+    updateCheckInFlight = false;
+  }
+}
 var InstanceManager = class {
   constructor(getSettings, save) {
     this.getSettings = getSettings;
@@ -7676,6 +7853,11 @@ var InstanceManager = class {
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
     syncModelConfig(vaultHome(vaultPath));
+    if (!settings.dshCommand.trim() && Date.now() - settings.lastUpdateCheck > UPDATE_CHECK_INTERVAL_MS) {
+      settings.lastUpdateCheck = Date.now();
+      void this.save();
+      void runUpdateCheck({});
+    }
     if (record && await probeDsh(record.port)) {
       onState?.(`\u8FD0\u884C\u4E2D @ ${record.port}`);
       return record.port;
@@ -7841,9 +8023,19 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("dsh \u53EF\u6267\u884C\u6587\u4EF6\u8DEF\u5F84").setDesc(
       "\u7559\u7A7A\u5219\u81EA\u52A8\u63A2\u6D4B\uFF08npm \u5168\u5C40\u5B89\u88C5 \u2192 npx \u7F13\u5B58 \u2192 \u5728\u7EBF npx \u5B89\u88C5\uFF09\u3002\u81EA\u52A8\u63A2\u6D4B\u5931\u8D25\u65F6\u8BF7\u624B\u52A8\u586B\u5199\u5B8C\u6574\u8DEF\u5F84\uFF0C\u4F8B\u5982 C:\\Users\\\u4F60\u7684\u7528\u6237\u540D\\AppData\\Roaming\\npm\\dsh.cmd"
     ).addText(
-      (text) => text.setPlaceholder(detectDshCommand() ?? "\u81EA\u52A8\u63A2\u6D4B / npx \u5728\u7EBF\u5B89\u88C5").setValue(this.plugin.settings.dshCommand).onChange(async (value) => {
+      (text) => text.setPlaceholder(pickBestInstall(detectDshInstalls())?.cmd ?? "\u81EA\u52A8\u63A2\u6D4B / npx \u5728\u7EBF\u5B89\u88C5").setValue(this.plugin.settings.dshCommand).onChange(async (value) => {
         this.plugin.settings.dshCommand = value.trim();
         await this.plugin.saveSettings();
+      })
+    );
+    const best = pickBestInstall(detectDshInstalls());
+    const updateSetting = new import_obsidian.Setting(containerEl).setName("dsh \u7248\u672C\u66F4\u65B0").setDesc(
+      best?.version ? `\u5F53\u524D\u4F7F\u7528\u672C\u5730 ${best.version}\u3002\u6BCF\u5929\u540E\u53F0\u81EA\u52A8\u68C0\u67E5\u4E00\u6B21\u5B98\u65B9\u65B0\u7248\uFF0C\u53D1\u73B0\u65B0\u7248\u9759\u9ED8\u4E0B\u8F7D\u3001\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u542F\u7528\u3002` : "\u672A\u68C0\u6D4B\u5230\u672C\u5730 dsh\uFF0C\u9996\u6B21\u542F\u52A8\u5C06 npx \u5728\u7EBF\u5B89\u88C5\u3002\u6BCF\u5929\u540E\u53F0\u81EA\u52A8\u68C0\u67E5\u4E00\u6B21\u5B98\u65B9\u65B0\u7248\u3002"
+    ).addButton(
+      (btn) => btn.setButtonText("\u68C0\u67E5\u5E76\u66F4\u65B0").onClick(async () => {
+        btn.setDisabled(true);
+        await runUpdateCheck({ force: true, onStatus: (s) => updateSetting.setDesc(s) });
+        btn.setDisabled(false);
       })
     );
     new import_obsidian.Setting(containerEl).setName("\u57FA\u7840\u7AEF\u53E3").setDesc(
