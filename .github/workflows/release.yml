@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -44,7 +46,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 "$(git rev-list --tags --skip=1 --max-count=1)" 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then RANGE="$PREV_TAG..HEAD"; else RANGE="HEAD"; fi
+          NOTES=$(git log $RANGE --pretty=format:"%s (%h)" | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+' | sed 's/^/- /')
+          if [ -z "$NOTES" ]; then NOTES="详见提交记录。"; fi
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes "$NOTES" \
             main.js manifest.json styles.css
