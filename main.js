@@ -7694,10 +7694,10 @@ function seedWorkspace(vaultHomePath, vaultPath) {
 }
 function resolveBootCommand(settings, port) {
   const custom = settings.dshCommand.trim();
-  if (custom) return { command: `"${custom}" web --port ${port}`, npxOnly: false };
+  if (custom) return { command: `"${custom}" web --port ${port} --no-open`, npxOnly: false };
   const best = pickBestInstall(detectDshInstalls());
-  if (best) return { command: `"${best.cmd}" web --port ${port}`, npxOnly: false };
-  return { command: `npx --yes @deepseek-ai/dsh web --port ${port}`, npxOnly: true };
+  if (best) return { command: `"${best.cmd}" web --port ${port} --no-open`, npxOnly: false };
+  return { command: `npx --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true };
 }
 function spawnDsh(bootCommand, vaultPath) {
   const child = (0, import_child_process.spawn)(bootCommand, {
