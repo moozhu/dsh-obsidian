@@ -11,7 +11,7 @@ import {
 } from "obsidian";
 import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
 import { get } from "http";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
@@ -34,6 +34,8 @@ import { parseDocument, Document } from "yaml";
 interface InstanceRecord {
   port: number;
   pid?: number;
+  /** dsh web 打印的接入 URL（alpha 鉴权时含 ?token=） */
+  url?: string;
 }
 
 interface DshSettings {
@@ -51,6 +53,8 @@ interface DshSettings {
   instances: Record<string, InstanceRecord>;
   /** 上次后台版本检查时间戳（24h 节流） */
   lastUpdateCheck: number;
+  /** 数据备份目录；留空 = 默认 %LOCALAPPDATA%\dsh-obsidian\<库Hash>\backups */
+  backupDir: string;
 }
 
 const DEFAULT_SETTINGS: DshSettings = {
@@ -61,6 +65,7 @@ const DEFAULT_SETTINGS: DshSettings = {
   viewLocation: "right-sidebar",
   instances: {},
   lastUpdateCheck: 0,
+  backupDir: "",
 };
 
 /** 启动错误：nodeMissing 时面板额外展示 Node.js 下载入口。 */
@@ -121,15 +126,31 @@ function probeDsh(port: number, timeoutMs = 3000): Promise<boolean> {
   return httpProbe(port, timeoutMs, (body) => body.includes("DeepSeek Harness"));
 }
 
-/** 轮询等待 DSH 就绪。 */
-async function waitForDsh(port: number, timeoutMs = 120000): Promise<void> {
+/** 从 dsh 的 stdout 里解析它自宣的 Web 地址（rc 无 token，alpha 带 ?token=）。 */
+function parseWebUrl(log: string): string | null {
+  const m = /dsh web:\s+(https?:\/\/[^\s]+)/.exec(log);
+  return m ? m[1] : null;
+}
+
+/**
+ * 轮询等待 DSH 就绪：优先以 dsh 自己打印的 URL 为准（一套逻辑同时兼容 rc 与 alpha 的鉴权差异）。
+ * 拿不到 URL（如 printUrl 被关闭）时回退为「端口上有 HTTP 服务即可」，url 为空由调用方兜底。
+ */
+async function waitForDsh(
+  port: number,
+  timeoutMs = 120000,
+  getLog: () => string = () => ""
+): Promise<{ url: string | null }> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (await probeDsh(port)) return;
+    const url = parseWebUrl(getLog());
+    if (url) return { url };
+    const alive = await probeAnyHttp(port, 1500);
     if (Date.now() > deadline) {
+      if (alive) return { url: null };
       throw new Error(`DSH 启动超时（端口 ${port}），请检查 Node.js 是否安装、路径设置是否正确`);
     }
-    await new Promise((r) => window.setTimeout(r, 1000));
+    await new Promise((r) => window.setTimeout(r, 500));
   }
 }
 
@@ -515,6 +536,133 @@ function seedWorkspace(vaultHomePath: string, vaultPath: string): void {
   }
 }
 
+/** 目标 dsh 版本是否启用浏览器鉴权（0.1.2 起，含 0.1.2-alpha.x 与未来正式版）。 */
+function needsAuthVersion(version: string | null): boolean {
+  if (!version) return false;
+  // 0.1.2 及更高（含 0.1.2-alpha.x/rc.x 等预发布）启用浏览器鉴权 + 投影缓存 schema 迁移。
+  // 注意不能用 compareSemver(version,"0.1.2")>=0：它把 0.1.2-alpha.3 判为小于 0.1.2，
+  // 导致 alpha 永远不会被识别为"需迁移"。这里只比较主版本号段，忽略预发布后缀。
+  const p = parseSemver(version);
+  if (!p) return false;
+  const [maj, min, patch] = p.nums;
+  return maj > 0 || (maj === 0 && (min > 1 || (min === 1 && patch >= 2)));
+}
+
+/**
+ * 把 rc 写的 session 投影缓存原地升级为 0.1.2+（浏览器鉴权版）可读的 schema：
+ * 每个 session 的 identity 补 isSeeded=false 与 inheritedEventCount=0（幂等）。
+ *
+ * dsh-storage 存在两种布局，都必须迁移：
+ * 1. 单文件（旧布局）：storages/session_projcache.json
+ *    结构 { unit, global, tables: { <table>: { <key>: { identity, rows } } } }
+ * 2. 分片（新布局）：storages/session_projcache/<table>/<key>.json
+ *    结构 { version: n, record: { identity, rows } }
+ * 实测 0.1.2-alpha.3 读的是分片布局——若只补单文件、漏掉分片，启动仍会
+ * invalid-record 崩溃（identity.isSeeded / inheritedEventCount 缺失）。
+ *
+ * 迁移前先把所有将被改动的文件备份到 backupDir（带时间戳），备份失败则放弃迁移。
+ */
+function migrateSessionProjectionCache(vaultHomePath: string, backupDir: string): void {
+  const storagesDir = join(vaultHomePath, "storages");
+  if (!existsSync(storagesDir)) return;
+
+  const rewrites: Array<{ file: string; data: unknown }> = [];
+
+  // 1. 单文件布局
+  const single = join(storagesDir, "session_projcache.json");
+  if (existsSync(single)) {
+    let data: { tables?: Record<string, Record<string, { identity?: Record<string, unknown> }>> } | null;
+    try {
+      data = JSON.parse(readFileSync(single, "utf8"));
+    } catch {
+      data = null; // 文件损坏，交给 dsh 自行兜底
+    }
+    if (data?.tables) {
+      let changed = 0;
+      for (const tableName of Object.keys(data.tables)) {
+        const records = data.tables[tableName];
+        if (!records) continue;
+        for (const key of Object.keys(records)) {
+          changed += patchIdentity(records[key]);
+        }
+      }
+      if (changed > 0) rewrites.push({ file: single, data });
+    }
+  }
+
+  // 2. 分片布局
+  const shardRoot = join(storagesDir, "session_projcache");
+  if (existsSync(shardRoot)) {
+    let tableNames: string[] = [];
+    try {
+      tableNames = readdirSync(shardRoot, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch {
+      tableNames = [];
+    }
+    for (const tableName of tableNames) {
+      const tablePath = join(shardRoot, tableName);
+      let files: string[] = [];
+      try {
+        files = readdirSync(tablePath).filter((f) => f.endsWith(".json"));
+      } catch {
+        files = [];
+      }
+      for (const f of files) {
+        const file = join(tablePath, f);
+        let data: { record?: { identity?: Record<string, unknown> } } | null;
+        try {
+          data = JSON.parse(readFileSync(file, "utf8"));
+        } catch {
+          data = null;
+        }
+        if (!data?.record) continue;
+        const changed = patchIdentity(data.record);
+        if (changed > 0) rewrites.push({ file, data });
+      }
+    }
+  }
+
+  if (rewrites.length === 0) return; // 已是最新 schema 或无需迁移
+
+  // 先备份、后写回；备份失败则放弃本次迁移，避免无备份就改动数据
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  let backedUp = true;
+  try {
+    mkdirSync(backupDir, { recursive: true });
+    for (const r of rewrites) {
+      copyFileSync(r.file, join(backupDir, `session_projcache.rc.${ts}.${basename(r.file)}`));
+    }
+  } catch {
+    backedUp = false;
+  }
+  if (!backedUp) return;
+  for (const r of rewrites) {
+    try {
+      writeFileSync(r.file, JSON.stringify(r.data), "utf8");
+    } catch {
+      // 单个写回失败不阻塞启动，dsh 会用（或重建）存储
+    }
+  }
+}
+
+/** 补一个 record 的 identity 缺失字段（isSeeded/inheritedEventCount），返回改动条数（0/1/2）。 */
+function patchIdentity(rec: { identity?: Record<string, unknown> } | undefined | null): number {
+  if (!rec || typeof rec !== "object") return 0;
+  if (!rec.identity || typeof rec.identity !== "object") rec.identity = {};
+  let changed = 0;
+  if (rec.identity.isSeeded === undefined) {
+    rec.identity.isSeeded = false;
+    changed++;
+  }
+  if (rec.identity.inheritedEventCount === undefined) {
+    rec.identity.inheritedEventCount = 0;
+    changed++;
+  }
+  return changed;
+}
+
 //#endregion
 
 //#region 进程管理
@@ -533,12 +681,14 @@ function seedWorkspace(vaultHomePath: string, vaultPath: string): void {
 function resolveBootCommand(
   settings: DshSettings,
   port: number
-): { command: string; npxOnly: boolean } {
+): { command: string; npxOnly: boolean; version: string | null } {
   const custom = settings.dshCommand.trim();
-  if (custom) return { command: `"${custom}" web --port ${port} --no-open`, npxOnly: false };
+  if (custom) return { command: `"${custom}" web --port ${port} --no-open`, npxOnly: false, version: null };
   const best = pickBestInstall(detectDshInstalls());
-  if (best) return { command: `"${best.cmd}" web --port ${port} --no-open`, npxOnly: false };
-  return { command: `npx --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true };
+  if (best) {
+    return { command: `"${best.cmd}" web --port ${port} --no-open`, npxOnly: false, version: best.version };
+  }
+  return { command: `npx --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true, version: null };
 }
 
 /**
@@ -588,9 +738,6 @@ function stopProcess(pid: number): void {
 //#endregion
 
 //#region 后台版本检查与更新
-
-const UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1000;
-let updateCheckInFlight = false;
 
 function runNpm(args: string[], timeoutMs: number): Promise<string | null> {
   return new Promise((resolve) => {
@@ -675,40 +822,23 @@ async function installLatestToManaged(latest: string): Promise<boolean> {
   }
 }
 
+type UpdateCheckResult =
+  | { kind: "error" }
+  | { kind: "up-to-date"; version: string }
+  | { kind: "update-available"; latest: string; current: string | null };
+
 /**
- * 版本检查主流程：查最新版 → 与本地最高版本比较 → 有新版才后台下载。
- * force=true（设置页手动按钮）时通过 onStatus 汇报每一步；自动检查静默。
+ * 只查询官方最新版并与本地最高版本比较，绝不自动下载/安装。
+ * 是否安装交由用户在设置页确认（决定权交给用户）。
  */
-async function runUpdateCheck(opts: {
-  force?: boolean;
-  onStatus?: (s: string) => void;
-}): Promise<void> {
-  if (updateCheckInFlight) {
-    opts.onStatus?.("已有检查在进行中，请稍候");
-    return;
+async function checkForUpdate(): Promise<UpdateCheckResult> {
+  const latest = await fetchLatestVersion();
+  if (!latest) return { kind: "error" };
+  const best = pickBestInstall(detectDshInstalls());
+  if (best?.version && compareSemver(latest, best.version) <= 0) {
+    return { kind: "up-to-date", version: best.version };
   }
-  updateCheckInFlight = true;
-  const notify = (s: string) => {
-    if (opts.force) opts.onStatus?.(s);
-  };
-  try {
-    notify("正在检查 dsh 最新版本 ...");
-    const latest = await fetchLatestVersion();
-    if (!latest) {
-      notify("检查失败：无法访问 registry（网络/代理问题），保持当前版本");
-      return;
-    }
-    const best = pickBestInstall(detectDshInstalls());
-    if (best?.version && compareSemver(latest, best.version) <= 0) {
-      notify(`已是最新（本地 ${best.version}）`);
-      return;
-    }
-    notify(`发现新版 ${latest}，后台下载中（不阻塞使用）...`);
-    const ok = await installLatestToManaged(latest);
-    notify(ok ? `dsh ${latest} 已就绪，下次打开面板自动启用` : "下载失败，保持当前版本，下次再试");
-  } finally {
-    updateCheckInFlight = false;
-  }
+  return { kind: "update-available", latest, current: best?.version ?? null };
 }
 
 //#endregion
@@ -736,7 +866,7 @@ class InstanceManager {
   async ensureRunning(
     vaultPath: string,
     onState?: (state: string) => void
-  ): Promise<number> {
+  ): Promise<{ port: number; url: string }> {
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
 
@@ -744,20 +874,10 @@ class InstanceManager {
     //    运行中的 DSH 会在 settings.yaml 写回后热重载，下次请求即可用上新配置。
     syncModelConfig(vaultHome(vaultPath));
 
-    // 0.5 后台版本检查：24h 节流、不阻塞启动；手动锁定路径的用户不参与自动更新。
-    if (
-      !settings.dshCommand.trim() &&
-      Date.now() - settings.lastUpdateCheck > UPDATE_CHECK_INTERVAL_MS
-    ) {
-      settings.lastUpdateCheck = Date.now();
-      void this.save();
-      void runUpdateCheck({});
-    }
-
-    // 1. 复用：之前记录过且端口上确实有 DSH 在响应
-    if (record && (await probeDsh(record.port))) {
+    // 1. 复用：之前记录过且端口上确实有 HTTP 服务（dsh 自占的端口，rc 与 alpha 均适用）
+    if (record && (await probeAnyHttp(record.port))) {
       onState?.(`运行中 @ ${record.port}`);
-      return record.port;
+      return { port: record.port, url: record.url ?? `http://127.0.0.1:${record.port}/` };
     }
 
     // 2. 前置检查：Node.js（npx 依赖）
@@ -773,18 +893,26 @@ class InstanceManager {
     }
 
     // 4. 准备库专属数据目录（种入库根工作区），启动 + 等待就绪
-    const { command: bootCommand, npxOnly } = resolveBootCommand(settings, port);
-    seedWorkspace(vaultHome(vaultPath), vaultPath);
+    const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port);
+    const dshHome = vaultHome(vaultPath);
+    if (needsAuthVersion(version)) {
+      const backupDir = settings.backupDir.trim() || join(dshHome, "backups");
+      migrateSessionProjectionCache(dshHome, backupDir);
+    }
+    seedWorkspace(dshHome, vaultPath);
     onState?.(`正在启动 @ ${port} ...`);
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
+    const getLog = () =>
+      (child as unknown as { __getLog?: () => string } | undefined)?.__getLog?.() ?? "";
+    let url: string | null;
     try {
       // 本地副本通常十几秒就绪；npx 冷安装要拉整棵依赖树，给足时间避免误杀
-      await waitForDsh(port, npxOnly ? 300_000 : 120_000);
+      url = (await waitForDsh(port, npxOnly ? 300_000 : 120_000, getLog)).url;
     } catch (e) {
       // 启动失败：杀掉残留子进程树，避免留下孤儿 dsh 占着端口（这也是反复超时的一大根因）
       if (child?.pid) stopProcess(child.pid);
-      const log = (child as unknown as { __getLog?: () => string } | undefined)?.__getLog?.() ?? "";
+      const log = getLog();
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
         `${msg}\n\n--- dsh 启动输出（末尾 3000 字符）---\n${log.slice(-3000) || "（无输出）"}\n` +
@@ -792,10 +920,11 @@ class InstanceManager {
       );
     }
 
-    settings.instances[vaultPath] = { port, pid };
+    const finalUrl = url ?? `http://127.0.0.1:${port}/`;
+    settings.instances[vaultPath] = { port, pid, url: finalUrl };
     await this.save();
     onState?.(`运行中 @ ${port}`);
-    return port;
+    return { port, url: finalUrl };
   }
 
   /** 停止所有已记录的实例。 */
@@ -843,14 +972,35 @@ class DshView extends ItemView {
     const vaultPath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
 
     try {
-      const port = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
+      const { url } = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
         status.setText(state);
         this.plugin.updateStatusBar(state);
       });
       status.remove();
 
-      const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
-      frame.setAttr("src", `http://127.0.0.1:${port}/`);
+      // 0.1.2+ 浏览器鉴权版：SameSite=Strict cookie 在跨站 iframe 里不发送（实测 401）。
+      // 改用 Electron <webview>：独立渲染进程，guest 内的顶层导航下 cookie 正常发送。
+      if (/\?token=/.test(url)) {
+        const wv = this.contentEl.createEl(
+          "webview" as unknown as keyof HTMLElementTagNameMap,
+          { cls: "dsh-frame" }
+        ) as unknown as HTMLElement;
+        wv.setAttribute("src", url);
+        wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
+        wv.addEventListener("did-fail-load", () => {
+          this.contentEl.empty();
+          const err = this.contentEl.createDiv({ cls: "dsh-status" });
+          err.setText(
+            "无法内嵌 DSH：当前 Obsidian 未启用 webview 组件。\n可点击下方链接在浏览器打开，或向插件作者反馈。"
+          );
+          const link = err.createEl("a", { text: "在浏览器打开 DSH", href: url });
+          link.setAttr("target", "_blank");
+          link.setAttr("rel", "noopener");
+        });
+      } else {
+        const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
+        frame.setAttr("src", url);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       status.setText(`启动失败：${message}`);
@@ -986,16 +1136,82 @@ class DshSettingTab extends PluginSettingTab {
       .setName("dsh 版本更新")
       .setDesc(
         best?.version
-          ? `当前使用本地 ${best.version}。每天后台自动检查一次官方新版，发现新版静默下载、下次打开面板启用。`
-          : "未检测到本地 dsh，首次启动将 npx 在线安装。每天后台自动检查一次官方新版。"
+          ? `当前使用本地 ${best.version}。默认使用本地已安装版本；只有你点击「检查更新」才联网查询，发现新版需确认后才安装。`
+          : "未检测到本地 dsh，首次启动将 npx 在线安装。默认不自动升级，可手动检查更新。"
       )
       .addButton((btn) =>
-        btn.setButtonText("检查并更新").onClick(async () => {
+        btn.setButtonText("检查更新").onClick(async () => {
           btn.setDisabled(true);
-          await runUpdateCheck({ force: true, onStatus: (s) => updateSetting.setDesc(s) });
+          updateSetting.setDesc("正在检查最新版本 ...");
+          const result = await checkForUpdate();
+          if (result.kind === "error") {
+            updateSetting.setDesc("检查失败：无法访问 registry（网络/代理问题），保持当前版本。");
+          } else if (result.kind === "up-to-date") {
+            updateSetting.setDesc(`已是最新（本地 ${result.version}）。`);
+          } else {
+            const { latest, current } = result;
+            updateSetting.setDesc(`发现新版 ${latest}${current ? `（当前 ${current}）` : ""}，等待确认。`);
+            const notice = new Notice(`发现 dsh 新版本 ${latest}，是否安装？`, 0);
+            const frag = new DocumentFragment();
+            const yes = frag.createEl("button", { text: "安装" });
+            const no = frag.createEl("button", { text: "取消" });
+            yes.onclick = async () => {
+              notice.hide();
+              updateSetting.setDesc(`正在安装 dsh ${latest} ...`);
+              const ok = await installLatestToManaged(latest);
+              updateSetting.setDesc(
+                ok
+                  ? `dsh ${latest} 已就绪，下次打开面板自动启用。`
+                  : "安装失败，保持当前版本，请稍后重试。"
+              );
+            };
+            no.onclick = () => {
+              notice.hide();
+              updateSetting.setDesc(`保持当前版本${current ? ` ${current}` : ""}，可随时重新检查更新。`);
+            };
+            notice.noticeEl.appendChild(frag);
+          }
           btn.setDisabled(false);
         })
       );
+
+    {
+      const vaultPath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
+      const defaultBackupDir = join(vaultHome(vaultPath), "backups");
+      new Setting(containerEl)
+        .setName("数据备份目录")
+        .setDesc(
+          "升级到 0.1.2+（浏览器鉴权版）时会自动迁移会话数据，迁移前把旧数据备份到此目录。" +
+            "留空则使用默认目录：" +
+            defaultBackupDir
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder(`留空 = ${defaultBackupDir}`)
+            .setValue(this.plugin.settings.backupDir)
+            .onChange(async (value) => {
+              this.plugin.settings.backupDir = value;
+              await this.plugin.saveSettings();
+            })
+        )
+        .addExtraButton((btn) =>
+          btn
+            .setIcon("folder")
+            .setTooltip("在文件管理器中定位备份文件夹")
+            .onClick(() => {
+              const target = this.plugin.settings.backupDir.trim() || defaultBackupDir;
+              try {
+                mkdirSync(target, { recursive: true });
+              } catch {
+                // 创建失败仍尝试定位（文件管理器会打开最近存在的父级）
+              }
+              const electron = (window as unknown as {
+                require?: (m: string) => { shell?: { showItemInFolder?: (p: string) => void } };
+              }).require;
+              electron?.("electron")?.shell?.showItemInFolder?.(target);
+            })
+        );
+    }
 
     new Setting(containerEl)
       .setName("基础端口")

@@ -7377,7 +7377,8 @@ var DEFAULT_SETTINGS = {
   stopOnUnload: true,
   viewLocation: "right-sidebar",
   instances: {},
-  lastUpdateCheck: 0
+  lastUpdateCheck: 0,
+  backupDir: ""
 };
 var BootError = class extends Error {
   constructor(message, nodeMissing = false) {
@@ -7418,17 +7419,21 @@ function httpProbe(port, timeoutMs, checkBody) {
 function probeAnyHttp(port, timeoutMs = 2e3) {
   return httpProbe(port, timeoutMs, null);
 }
-function probeDsh(port, timeoutMs = 3e3) {
-  return httpProbe(port, timeoutMs, (body) => body.includes("DeepSeek Harness"));
+function parseWebUrl(log) {
+  const m = /dsh web:\s+(https?:\/\/[^\s]+)/.exec(log);
+  return m ? m[1] : null;
 }
-async function waitForDsh(port, timeoutMs = 12e4) {
+async function waitForDsh(port, timeoutMs = 12e4, getLog = () => "") {
   const deadline = Date.now() + timeoutMs;
   for (; ; ) {
-    if (await probeDsh(port)) return;
+    const url = parseWebUrl(getLog());
+    if (url) return { url };
+    const alive = await probeAnyHttp(port, 1500);
     if (Date.now() > deadline) {
+      if (alive) return { url: null };
       throw new Error(`DSH \u542F\u52A8\u8D85\u65F6\uFF08\u7AEF\u53E3 ${port}\uFF09\uFF0C\u8BF7\u68C0\u67E5 Node.js \u662F\u5426\u5B89\u88C5\u3001\u8DEF\u5F84\u8BBE\u7F6E\u662F\u5426\u6B63\u786E`);
     }
-    await new Promise((r) => window.setTimeout(r, 1e3));
+    await new Promise((r) => window.setTimeout(r, 500));
   }
 }
 function probeNode(timeoutMs = 8e3) {
@@ -7692,12 +7697,108 @@ function seedWorkspace(vaultHomePath, vaultPath) {
   } catch {
   }
 }
+function needsAuthVersion(version) {
+  if (!version) return false;
+  const p = parseSemver(version);
+  if (!p) return false;
+  const [maj, min, patch] = p.nums;
+  return maj > 0 || maj === 0 && (min > 1 || min === 1 && patch >= 2);
+}
+function migrateSessionProjectionCache(vaultHomePath, backupDir) {
+  const storagesDir = (0, import_path.join)(vaultHomePath, "storages");
+  if (!(0, import_fs.existsSync)(storagesDir)) return;
+  const rewrites = [];
+  const single = (0, import_path.join)(storagesDir, "session_projcache.json");
+  if ((0, import_fs.existsSync)(single)) {
+    let data;
+    try {
+      data = JSON.parse((0, import_fs.readFileSync)(single, "utf8"));
+    } catch {
+      data = null;
+    }
+    if (data?.tables) {
+      let changed = 0;
+      for (const tableName of Object.keys(data.tables)) {
+        const records = data.tables[tableName];
+        if (!records) continue;
+        for (const key of Object.keys(records)) {
+          changed += patchIdentity(records[key]);
+        }
+      }
+      if (changed > 0) rewrites.push({ file: single, data });
+    }
+  }
+  const shardRoot = (0, import_path.join)(storagesDir, "session_projcache");
+  if ((0, import_fs.existsSync)(shardRoot)) {
+    let tableNames = [];
+    try {
+      tableNames = (0, import_fs.readdirSync)(shardRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch {
+      tableNames = [];
+    }
+    for (const tableName of tableNames) {
+      const tablePath = (0, import_path.join)(shardRoot, tableName);
+      let files = [];
+      try {
+        files = (0, import_fs.readdirSync)(tablePath).filter((f) => f.endsWith(".json"));
+      } catch {
+        files = [];
+      }
+      for (const f of files) {
+        const file = (0, import_path.join)(tablePath, f);
+        let data;
+        try {
+          data = JSON.parse((0, import_fs.readFileSync)(file, "utf8"));
+        } catch {
+          data = null;
+        }
+        if (!data?.record) continue;
+        const changed = patchIdentity(data.record);
+        if (changed > 0) rewrites.push({ file, data });
+      }
+    }
+  }
+  if (rewrites.length === 0) return;
+  const ts = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  let backedUp = true;
+  try {
+    (0, import_fs.mkdirSync)(backupDir, { recursive: true });
+    for (const r of rewrites) {
+      (0, import_fs.copyFileSync)(r.file, (0, import_path.join)(backupDir, `session_projcache.rc.${ts}.${(0, import_path.basename)(r.file)}`));
+    }
+  } catch {
+    backedUp = false;
+  }
+  if (!backedUp) return;
+  for (const r of rewrites) {
+    try {
+      (0, import_fs.writeFileSync)(r.file, JSON.stringify(r.data), "utf8");
+    } catch {
+    }
+  }
+}
+function patchIdentity(rec) {
+  if (!rec || typeof rec !== "object") return 0;
+  if (!rec.identity || typeof rec.identity !== "object") rec.identity = {};
+  let changed = 0;
+  if (rec.identity.isSeeded === void 0) {
+    rec.identity.isSeeded = false;
+    changed++;
+  }
+  if (rec.identity.inheritedEventCount === void 0) {
+    rec.identity.inheritedEventCount = 0;
+    changed++;
+  }
+  return changed;
+}
 function resolveBootCommand(settings, port) {
   const custom = settings.dshCommand.trim();
-  if (custom) return { command: `"${custom}" web --port ${port} --no-open`, npxOnly: false };
+  if (custom) return { command: `"${custom}" web --port ${port} --no-open`, npxOnly: false, version: null };
   const best = pickBestInstall(detectDshInstalls());
-  if (best) return { command: `"${best.cmd}" web --port ${port} --no-open`, npxOnly: false };
-  return { command: `npx --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true };
+  if (best) {
+    return { command: `"${best.cmd}" web --port ${port} --no-open`, npxOnly: false, version: best.version };
+  }
+  return { command: `npx --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true, version: null };
 }
 function spawnDsh(bootCommand, vaultPath) {
   const child = (0, import_child_process.spawn)(bootCommand, {
@@ -7736,8 +7837,6 @@ function stopProcess(pid) {
     stdio: "ignore"
   });
 }
-var UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1e3;
-var updateCheckInFlight = false;
 function runNpm(args, timeoutMs) {
   return new Promise((resolve) => {
     const child = (0, import_child_process.spawn)(`npm ${args.join(" ")}`, {
@@ -7808,33 +7907,14 @@ async function installLatestToManaged(latest) {
     return false;
   }
 }
-async function runUpdateCheck(opts) {
-  if (updateCheckInFlight) {
-    opts.onStatus?.("\u5DF2\u6709\u68C0\u67E5\u5728\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u7A0D\u5019");
-    return;
+async function checkForUpdate() {
+  const latest = await fetchLatestVersion();
+  if (!latest) return { kind: "error" };
+  const best = pickBestInstall(detectDshInstalls());
+  if (best?.version && compareSemver(latest, best.version) <= 0) {
+    return { kind: "up-to-date", version: best.version };
   }
-  updateCheckInFlight = true;
-  const notify = (s) => {
-    if (opts.force) opts.onStatus?.(s);
-  };
-  try {
-    notify("\u6B63\u5728\u68C0\u67E5 dsh \u6700\u65B0\u7248\u672C ...");
-    const latest = await fetchLatestVersion();
-    if (!latest) {
-      notify("\u68C0\u67E5\u5931\u8D25\uFF1A\u65E0\u6CD5\u8BBF\u95EE registry\uFF08\u7F51\u7EDC/\u4EE3\u7406\u95EE\u9898\uFF09\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C");
-      return;
-    }
-    const best = pickBestInstall(detectDshInstalls());
-    if (best?.version && compareSemver(latest, best.version) <= 0) {
-      notify(`\u5DF2\u662F\u6700\u65B0\uFF08\u672C\u5730 ${best.version}\uFF09`);
-      return;
-    }
-    notify(`\u53D1\u73B0\u65B0\u7248 ${latest}\uFF0C\u540E\u53F0\u4E0B\u8F7D\u4E2D\uFF08\u4E0D\u963B\u585E\u4F7F\u7528\uFF09...`);
-    const ok = await installLatestToManaged(latest);
-    notify(ok ? `dsh ${latest} \u5DF2\u5C31\u7EEA\uFF0C\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u542F\u7528` : "\u4E0B\u8F7D\u5931\u8D25\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\uFF0C\u4E0B\u6B21\u518D\u8BD5");
-  } finally {
-    updateCheckInFlight = false;
-  }
+  return { kind: "update-available", latest, current: best?.version ?? null };
 }
 var InstanceManager = class {
   constructor(getSettings, save) {
@@ -7853,14 +7933,9 @@ var InstanceManager = class {
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
     syncModelConfig(vaultHome(vaultPath));
-    if (!settings.dshCommand.trim() && Date.now() - settings.lastUpdateCheck > UPDATE_CHECK_INTERVAL_MS) {
-      settings.lastUpdateCheck = Date.now();
-      void this.save();
-      void runUpdateCheck({});
-    }
-    if (record && await probeDsh(record.port)) {
+    if (record && await probeAnyHttp(record.port)) {
       onState?.(`\u8FD0\u884C\u4E2D @ ${record.port}`);
-      return record.port;
+      return { port: record.port, url: record.url ?? `http://127.0.0.1:${record.port}/` };
     }
     if (!await probeNode()) {
       throw new BootError("\u672A\u68C0\u6D4B\u5230 Node.js\uFF08DSH \u4F9D\u8D56\u5B83\u8FD0\u884C\uFF09", true);
@@ -7870,16 +7945,23 @@ var InstanceManager = class {
       if (!await probeAnyHttp(port)) break;
       port++;
     }
-    const { command: bootCommand, npxOnly } = resolveBootCommand(settings, port);
-    seedWorkspace(vaultHome(vaultPath), vaultPath);
+    const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port);
+    const dshHome = vaultHome(vaultPath);
+    if (needsAuthVersion(version)) {
+      const backupDir = settings.backupDir.trim() || (0, import_path.join)(dshHome, "backups");
+      migrateSessionProjectionCache(dshHome, backupDir);
+    }
+    seedWorkspace(dshHome, vaultPath);
     onState?.(`\u6B63\u5728\u542F\u52A8 @ ${port} ...`);
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
+    const getLog = () => child?.__getLog?.() ?? "";
+    let url;
     try {
-      await waitForDsh(port, npxOnly ? 3e5 : 12e4);
+      url = (await waitForDsh(port, npxOnly ? 3e5 : 12e4, getLog)).url;
     } catch (e) {
       if (child?.pid) stopProcess(child.pid);
-      const log = child?.__getLog?.() ?? "";
+      const log = getLog();
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
         `${msg}
@@ -7889,10 +7971,11 @@ ${log.slice(-3e3) || "\uFF08\u65E0\u8F93\u51FA\uFF09"}
 \u63D0\u793A\uFF1A\u53EF\u5728\u7EC8\u7AEF\u8FDB\u5165\u5E93\u76EE\u5F55\u6267\u884C  npx --yes @deepseek-ai/dsh web --port <\u7AEF\u53E3>  \u67E5\u770B\u5B8C\u6574\u62A5\u9519\u3002`
       );
     }
-    settings.instances[vaultPath] = { port, pid };
+    const finalUrl = url ?? `http://127.0.0.1:${port}/`;
+    settings.instances[vaultPath] = { port, pid, url: finalUrl };
     await this.save();
     onState?.(`\u8FD0\u884C\u4E2D @ ${port}`);
-    return port;
+    return { port, url: finalUrl };
   }
   /** 停止所有已记录的实例。 */
   stopAll() {
@@ -7925,13 +8008,32 @@ var DshView = class extends import_obsidian.ItemView {
     status.setText("\u6B63\u5728\u542F\u52A8 DSH ...");
     const vaultPath = this.app.vault.adapter.getBasePath();
     try {
-      const port = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
+      const { url } = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
         status.setText(state);
         this.plugin.updateStatusBar(state);
       });
       status.remove();
-      const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
-      frame.setAttr("src", `http://127.0.0.1:${port}/`);
+      if (/\?token=/.test(url)) {
+        const wv = this.contentEl.createEl(
+          "webview",
+          { cls: "dsh-frame" }
+        );
+        wv.setAttribute("src", url);
+        wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
+        wv.addEventListener("did-fail-load", () => {
+          this.contentEl.empty();
+          const err = this.contentEl.createDiv({ cls: "dsh-status" });
+          err.setText(
+            "\u65E0\u6CD5\u5185\u5D4C DSH\uFF1A\u5F53\u524D Obsidian \u672A\u542F\u7528 webview \u7EC4\u4EF6\u3002\n\u53EF\u70B9\u51FB\u4E0B\u65B9\u94FE\u63A5\u5728\u6D4F\u89C8\u5668\u6253\u5F00\uFF0C\u6216\u5411\u63D2\u4EF6\u4F5C\u8005\u53CD\u9988\u3002"
+          );
+          const link = err.createEl("a", { text: "\u5728\u6D4F\u89C8\u5668\u6253\u5F00 DSH", href: url });
+          link.setAttr("target", "_blank");
+          link.setAttr("rel", "noopener");
+        });
+      } else {
+        const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
+        frame.setAttr("src", url);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       status.setText(`\u542F\u52A8\u5931\u8D25\uFF1A${message}`);
@@ -8030,14 +8132,62 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
     );
     const best = pickBestInstall(detectDshInstalls());
     const updateSetting = new import_obsidian.Setting(containerEl).setName("dsh \u7248\u672C\u66F4\u65B0").setDesc(
-      best?.version ? `\u5F53\u524D\u4F7F\u7528\u672C\u5730 ${best.version}\u3002\u6BCF\u5929\u540E\u53F0\u81EA\u52A8\u68C0\u67E5\u4E00\u6B21\u5B98\u65B9\u65B0\u7248\uFF0C\u53D1\u73B0\u65B0\u7248\u9759\u9ED8\u4E0B\u8F7D\u3001\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u542F\u7528\u3002` : "\u672A\u68C0\u6D4B\u5230\u672C\u5730 dsh\uFF0C\u9996\u6B21\u542F\u52A8\u5C06 npx \u5728\u7EBF\u5B89\u88C5\u3002\u6BCF\u5929\u540E\u53F0\u81EA\u52A8\u68C0\u67E5\u4E00\u6B21\u5B98\u65B9\u65B0\u7248\u3002"
+      best?.version ? `\u5F53\u524D\u4F7F\u7528\u672C\u5730 ${best.version}\u3002\u9ED8\u8BA4\u4F7F\u7528\u672C\u5730\u5DF2\u5B89\u88C5\u7248\u672C\uFF1B\u53EA\u6709\u4F60\u70B9\u51FB\u300C\u68C0\u67E5\u66F4\u65B0\u300D\u624D\u8054\u7F51\u67E5\u8BE2\uFF0C\u53D1\u73B0\u65B0\u7248\u9700\u786E\u8BA4\u540E\u624D\u5B89\u88C5\u3002` : "\u672A\u68C0\u6D4B\u5230\u672C\u5730 dsh\uFF0C\u9996\u6B21\u542F\u52A8\u5C06 npx \u5728\u7EBF\u5B89\u88C5\u3002\u9ED8\u8BA4\u4E0D\u81EA\u52A8\u5347\u7EA7\uFF0C\u53EF\u624B\u52A8\u68C0\u67E5\u66F4\u65B0\u3002"
     ).addButton(
-      (btn) => btn.setButtonText("\u68C0\u67E5\u5E76\u66F4\u65B0").onClick(async () => {
+      (btn) => btn.setButtonText("\u68C0\u67E5\u66F4\u65B0").onClick(async () => {
         btn.setDisabled(true);
-        await runUpdateCheck({ force: true, onStatus: (s) => updateSetting.setDesc(s) });
+        updateSetting.setDesc("\u6B63\u5728\u68C0\u67E5\u6700\u65B0\u7248\u672C ...");
+        const result = await checkForUpdate();
+        if (result.kind === "error") {
+          updateSetting.setDesc("\u68C0\u67E5\u5931\u8D25\uFF1A\u65E0\u6CD5\u8BBF\u95EE registry\uFF08\u7F51\u7EDC/\u4EE3\u7406\u95EE\u9898\uFF09\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\u3002");
+        } else if (result.kind === "up-to-date") {
+          updateSetting.setDesc(`\u5DF2\u662F\u6700\u65B0\uFF08\u672C\u5730 ${result.version}\uFF09\u3002`);
+        } else {
+          const { latest, current } = result;
+          updateSetting.setDesc(`\u53D1\u73B0\u65B0\u7248 ${latest}${current ? `\uFF08\u5F53\u524D ${current}\uFF09` : ""}\uFF0C\u7B49\u5F85\u786E\u8BA4\u3002`);
+          const notice = new import_obsidian.Notice(`\u53D1\u73B0 dsh \u65B0\u7248\u672C ${latest}\uFF0C\u662F\u5426\u5B89\u88C5\uFF1F`, 0);
+          const frag = new DocumentFragment();
+          const yes = frag.createEl("button", { text: "\u5B89\u88C5" });
+          const no = frag.createEl("button", { text: "\u53D6\u6D88" });
+          yes.onclick = async () => {
+            notice.hide();
+            updateSetting.setDesc(`\u6B63\u5728\u5B89\u88C5 dsh ${latest} ...`);
+            const ok = await installLatestToManaged(latest);
+            updateSetting.setDesc(
+              ok ? `dsh ${latest} \u5DF2\u5C31\u7EEA\uFF0C\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u542F\u7528\u3002` : "\u5B89\u88C5\u5931\u8D25\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002"
+            );
+          };
+          no.onclick = () => {
+            notice.hide();
+            updateSetting.setDesc(`\u4FDD\u6301\u5F53\u524D\u7248\u672C${current ? ` ${current}` : ""}\uFF0C\u53EF\u968F\u65F6\u91CD\u65B0\u68C0\u67E5\u66F4\u65B0\u3002`);
+          };
+          notice.noticeEl.appendChild(frag);
+        }
         btn.setDisabled(false);
       })
     );
+    {
+      const vaultPath = this.app.vault.adapter.getBasePath();
+      const defaultBackupDir = (0, import_path.join)(vaultHome(vaultPath), "backups");
+      new import_obsidian.Setting(containerEl).setName("\u6570\u636E\u5907\u4EFD\u76EE\u5F55").setDesc(
+        "\u5347\u7EA7\u5230 0.1.2+\uFF08\u6D4F\u89C8\u5668\u9274\u6743\u7248\uFF09\u65F6\u4F1A\u81EA\u52A8\u8FC1\u79FB\u4F1A\u8BDD\u6570\u636E\uFF0C\u8FC1\u79FB\u524D\u628A\u65E7\u6570\u636E\u5907\u4EFD\u5230\u6B64\u76EE\u5F55\u3002\u7559\u7A7A\u5219\u4F7F\u7528\u9ED8\u8BA4\u76EE\u5F55\uFF1A" + defaultBackupDir
+      ).addText(
+        (text) => text.setPlaceholder(`\u7559\u7A7A = ${defaultBackupDir}`).setValue(this.plugin.settings.backupDir).onChange(async (value) => {
+          this.plugin.settings.backupDir = value;
+          await this.plugin.saveSettings();
+        })
+      ).addExtraButton(
+        (btn) => btn.setIcon("folder").setTooltip("\u5728\u6587\u4EF6\u7BA1\u7406\u5668\u4E2D\u5B9A\u4F4D\u5907\u4EFD\u6587\u4EF6\u5939").onClick(() => {
+          const target = this.plugin.settings.backupDir.trim() || defaultBackupDir;
+          try {
+            (0, import_fs.mkdirSync)(target, { recursive: true });
+          } catch {
+          }
+          const electron = window.require;
+          electron?.("electron")?.shell?.showItemInFolder?.(target);
+        })
+      );
+    }
     new import_obsidian.Setting(containerEl).setName("\u57FA\u7840\u7AEF\u53E3").setDesc(
       "\u6BCF\u4E2A\u5E93\u5360\u7528\u4E00\u4E2A\u7AEF\u53E3\uFF08\u4ECE\u57FA\u7840\u7AEF\u53E3\u5F80\u4E0A\u627E\u7A7A\u95F2\uFF09\u3002\u9ED8\u8BA4 3090\uFF0C\u907F\u5F00\u684C\u9762\u7248 DSH \u5E38\u7528\u7684 3080\u3002"
     ).addText(
