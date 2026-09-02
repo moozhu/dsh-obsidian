@@ -7863,13 +7863,17 @@ function runNpm(args, timeoutMs) {
     });
   });
 }
-async function fetchLatestVersion() {
-  const viaConfig = await runNpm(["view", "@deepseek-ai/dsh", "version"], 15e3);
+var NPM_MIRROR_REGISTRY = "https://registry.npmmirror.com";
+async function fetchChannelVersion(channel) {
+  const tag = channel === "stable" ? "dist-tags.latest" : "dist-tags.alpha";
+  const viaConfig = await runNpm(["view", "@deepseek-ai/dsh", tag], 15e3);
   if (viaConfig) return viaConfig;
-  return runNpm(
-    ["--proxy", "null", "--https-proxy", "null", "view", "@deepseek-ai/dsh", "version"],
+  const direct = await runNpm(
+    ["--proxy", "null", "--https-proxy", "null", "view", "@deepseek-ai/dsh", tag],
     15e3
   );
+  if (direct) return direct;
+  return runNpm(["--registry", NPM_MIRROR_REGISTRY, "view", "@deepseek-ai/dsh", tag], 15e3);
 }
 async function installLatestToManaged(latest) {
   const target = managedDshDir();
@@ -7889,7 +7893,7 @@ async function installLatestToManaged(latest) {
     "--no-fund",
     "--loglevel=error"
   ];
-  const ok = await runNpm(installArgs, 12e4) !== null || await runNpm(["--proxy", "null", "--https-proxy", "null", ...installArgs], 6e5) !== null;
+  const ok = await runNpm(installArgs, 12e4) !== null || await runNpm(["--proxy", "null", "--https-proxy", "null", ...installArgs], 6e5) !== null || await runNpm(["--registry", NPM_MIRROR_REGISTRY, ...installArgs], 6e5) !== null;
   const installedVersion = readDshVersion((0, import_path.join)(tmp, "node_modules", "@deepseek-ai", "dsh", "package.json"));
   const valid = ok && installedVersion === latest && (0, import_fs.existsSync)((0, import_path.join)(tmp, "node_modules", ".bin", "dsh.cmd"));
   if (!valid) {
@@ -7907,12 +7911,12 @@ async function installLatestToManaged(latest) {
     return false;
   }
 }
-async function checkForUpdate() {
-  const latest = await fetchLatestVersion();
+async function checkForUpdate(channel) {
+  const latest = await fetchChannelVersion(channel);
   if (!latest) return { kind: "error" };
   const best = pickBestInstall(detectDshInstalls());
   if (best?.version && compareSemver(latest, best.version) <= 0) {
-    return { kind: "up-to-date", version: best.version };
+    return { kind: "up-to-date", version: best.version, latest };
   }
   return { kind: "update-available", latest, current: best?.version ?? null };
 }
@@ -8131,31 +8135,64 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     const best = pickBestInstall(detectDshInstalls());
+    let channel = "stable";
+    const channelLabel = (c) => c === "stable" ? "\u7A33\u5B9A\u7248" : "alpha \u4F53\u9A8C\u7248";
     const updateSetting = new import_obsidian.Setting(containerEl).setName("dsh \u7248\u672C\u66F4\u65B0").setDesc(
-      best?.version ? `\u5F53\u524D\u4F7F\u7528\u672C\u5730 ${best.version}\u3002\u9ED8\u8BA4\u4F7F\u7528\u672C\u5730\u5DF2\u5B89\u88C5\u7248\u672C\uFF1B\u53EA\u6709\u4F60\u70B9\u51FB\u300C\u68C0\u67E5\u66F4\u65B0\u300D\u624D\u8054\u7F51\u67E5\u8BE2\uFF0C\u53D1\u73B0\u65B0\u7248\u9700\u786E\u8BA4\u540E\u624D\u5B89\u88C5\u3002` : "\u672A\u68C0\u6D4B\u5230\u672C\u5730 dsh\uFF0C\u9996\u6B21\u542F\u52A8\u5C06 npx \u5728\u7EBF\u5B89\u88C5\u3002\u9ED8\u8BA4\u4E0D\u81EA\u52A8\u5347\u7EA7\uFF0C\u53EF\u624B\u52A8\u68C0\u67E5\u66F4\u65B0\u3002"
+      best?.version ? `\u5F53\u524D\u4F7F\u7528\u672C\u5730 ${best.version}\u3002\u9009\u62E9\u901A\u9053\u540E\u70B9\u300C\u68C0\u67E5\u66F4\u65B0\u300D\u624D\u8054\u7F51\u67E5\u8BE2\uFF08\u7A33\u5B9A\u7248 = npm \u5B98\u65B9\u6B63\u5F0F\u901A\u9053\uFF0Calpha \u4F53\u9A8C\u7248 = \u5B98\u65B9\u9884\u89C8\u901A\u9053\uFF09\uFF0C\u53D1\u73B0\u65B0\u7248\u9700\u786E\u8BA4\u540E\u624D\u5B89\u88C5\u3002` : "\u672A\u68C0\u6D4B\u5230\u672C\u5730 dsh\uFF0C\u9996\u6B21\u542F\u52A8\u5C06 npx \u5728\u7EBF\u5B89\u88C5\u3002\u9ED8\u8BA4\u4E0D\u81EA\u52A8\u5347\u7EA7\uFF0C\u53EF\u624B\u52A8\u68C0\u67E5\u66F4\u65B0\u3002"
+    ).addDropdown(
+      (dd) => dd.addOption("stable", "\u7A33\u5B9A\u7248").addOption("alpha", "alpha \u4F53\u9A8C\u7248").setValue("stable").onChange((value) => {
+        channel = value;
+      })
     ).addButton(
       (btn) => btn.setButtonText("\u68C0\u67E5\u66F4\u65B0").onClick(async () => {
         btn.setDisabled(true);
-        updateSetting.setDesc("\u6B63\u5728\u68C0\u67E5\u6700\u65B0\u7248\u672C ...");
-        const result = await checkForUpdate();
+        updateSetting.setDesc(`\u6B63\u5728\u68C0\u67E5${channelLabel(channel)}\u901A\u9053\u6700\u65B0\u7248\u672C ...`);
+        const result = await checkForUpdate(channel);
         if (result.kind === "error") {
-          updateSetting.setDesc("\u68C0\u67E5\u5931\u8D25\uFF1A\u65E0\u6CD5\u8BBF\u95EE registry\uFF08\u7F51\u7EDC/\u4EE3\u7406\u95EE\u9898\uFF09\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\u3002");
+          updateSetting.setDesc(
+            channel === "alpha" ? "\u68C0\u67E5\u5931\u8D25\uFF1A\u65E0\u6CD5\u8BBF\u95EE registry\uFF0C\u6216 alpha \u901A\u9053\u6682\u65E0\u53EF\u7528\u7248\u672C\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\u3002" : "\u68C0\u67E5\u5931\u8D25\uFF1A\u65E0\u6CD5\u8BBF\u95EE registry\uFF08\u7F51\u7EDC/\u4EE3\u7406\u95EE\u9898\uFF09\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\u3002"
+          );
         } else if (result.kind === "up-to-date") {
-          updateSetting.setDesc(`\u5DF2\u662F\u6700\u65B0\uFF08\u672C\u5730 ${result.version}\uFF09\u3002`);
+          updateSetting.setDesc(
+            result.version !== result.latest ? `${channelLabel(channel)}\u901A\u9053\u6700\u65B0 ${result.latest}\uFF0C\u672C\u5730 ${result.version} \u66F4\u9AD8\uFF0C\u65E0\u9700\u66F4\u65B0\u3002` : `\u5DF2\u662F\u6700\u65B0\uFF08${result.latest}\uFF09\u3002`
+          );
         } else {
           const { latest, current } = result;
-          updateSetting.setDesc(`\u53D1\u73B0\u65B0\u7248 ${latest}${current ? `\uFF08\u5F53\u524D ${current}\uFF09` : ""}\uFF0C\u7B49\u5F85\u786E\u8BA4\u3002`);
-          const notice = new import_obsidian.Notice(`\u53D1\u73B0 dsh \u65B0\u7248\u672C ${latest}\uFF0C\u662F\u5426\u5B89\u88C5\uFF1F`, 0);
+          updateSetting.setDesc(
+            `${channelLabel(channel)}\u901A\u9053\u53D1\u73B0\u65B0\u7248 ${latest}${current ? `\uFF08\u5F53\u524D ${current}\uFF09` : ""}\uFF0C\u7B49\u5F85\u786E\u8BA4\u3002`
+          );
+          const notice = new import_obsidian.Notice(
+            channel === "alpha" ? `\u53D1\u73B0 alpha \u4F53\u9A8C\u7248 ${latest}\uFF0C\u662F\u5426\u5B89\u88C5\uFF1F\uFF08\u5347\u7EA7\u4F1A\u81EA\u52A8\u8FC1\u79FB\u4F1A\u8BDD\u6570\u636E\uFF0C\u5386\u53F2\u4E0D\u4E22\uFF09` : `\u53D1\u73B0\u7A33\u5B9A\u7248\u65B0\u7248\u672C ${latest}\uFF0C\u662F\u5426\u5B89\u88C5\uFF1F`,
+            0
+          );
           const frag = new DocumentFragment();
           const yes = frag.createEl("button", { text: "\u5B89\u88C5" });
           const no = frag.createEl("button", { text: "\u53D6\u6D88" });
           yes.onclick = async () => {
             notice.hide();
             updateSetting.setDesc(`\u6B63\u5728\u5B89\u88C5 dsh ${latest} ...`);
-            const ok = await installLatestToManaged(latest);
-            updateSetting.setDesc(
-              ok ? `dsh ${latest} \u5DF2\u5C31\u7EEA\uFF0C\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u542F\u7528\u3002` : "\u5B89\u88C5\u5931\u8D25\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002"
-            );
+            const installing = new import_obsidian.Notice(`\u6B63\u5728\u5B89\u88C5 dsh ${latest}\uFF08\u4E0B\u8F7D\u4F9D\u8D56\uFF0C\u7EA6\u9700 1-2 \u5206\u949F\uFF0C\u8BF7\u52FF\u5173\u95ED Obsidian\uFF09...`, 0);
+            const startAt = Date.now();
+            const ticker = window.setInterval(() => {
+              const secs = Math.round((Date.now() - startAt) / 1e3);
+              installing.setMessage(
+                `\u6B63\u5728\u5B89\u88C5 dsh ${latest}\uFF08\u5DF2\u7B49\u5F85 ${secs}s\uFF0C\u4E0B\u8F7D\u4F9D\u8D56\u4E2D\uFF0C\u8BF7\u52FF\u5173\u95ED Obsidian\uFF09...`
+              );
+            }, 5e3);
+            let ok = false;
+            try {
+              ok = await installLatestToManaged(latest);
+            } finally {
+              window.clearInterval(ticker);
+              installing.hide();
+            }
+            if (ok) {
+              new import_obsidian.Notice(`dsh ${latest} \u5B89\u88C5\u5B8C\u6210\uFF0C\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u542F\u7528\u3002`, 1e4);
+              updateSetting.setDesc(`dsh ${latest} \u5DF2\u5C31\u7EEA\uFF0C\u4E0B\u6B21\u6253\u5F00\u9762\u677F\u81EA\u52A8\u542F\u7528\u3002`);
+            } else {
+              new import_obsidian.Notice(`dsh ${latest} \u5B89\u88C5\u5931\u8D25\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002`, 1e4);
+              updateSetting.setDesc("\u5B89\u88C5\u5931\u8D25\uFF0C\u4FDD\u6301\u5F53\u524D\u7248\u672C\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002");
+            }
           };
           no.onclick = () => {
             notice.hide();

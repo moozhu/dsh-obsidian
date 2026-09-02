@@ -1,6 +1,6 @@
 {
   "name": "dsh-obsidian",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "Embed DeepSeek Harness Web UI in Obsidian, one isolated workspace per vault.",
   "main": "main.js",
   "scripts": {

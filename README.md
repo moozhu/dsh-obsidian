@@ -2,14 +2,30 @@
 
 > 🌐 [简体中文](README.zh-CN.md)
 
-Embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) web UI inside Obsidian. Each vault gets its **own isolated DSH instance**: open a vault and DSH starts with that vault as its workspace automatically. Session histories stay per-vault and never mix.
+Embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (DSH) native Web UI **inside Obsidian**. Each vault gets its **own fully isolated DSH instance**: open a vault and DSH starts with that vault as its workspace. Session histories stay per-vault and never mix.
 
-> The plugin is a **launcher + plain iframe client**. It does not bundle or call any DSH API — upgrade DSH, restart the panel, and you're on the new kernel instantly. The plugin itself never needs an update for that.
+**Why you'll want it:**
+
+- 🔀 **rc / alpha kernels both supported** — old session data is migrated automatically on upgrade, so history survives kernel jumps (browser-auth alpha works out of the box)
+- 🗂 **One instance per vault** — isolated port, data directory and sessions per vault; open several vaults side by side, zero interference
+- 🎛 **You decide when to update** — stable / alpha channels in settings; updates only install after explicit confirmation. **No silent upgrades, ever.**
+
+## Features
+
+- **Native webview embed**: the real DSH UI inside the panel (token-authenticated, direct to localhost — no proxy layer), identical to the browser experience
+- **rc / alpha compatibility + automatic data migration**: upgrading to alpha (browser-auth edition) auto-migrates old session data (both single-file and sharded storage layouts), history carried over seamlessly
+- **Backup before migration**: old data is backed up locally before any migration — custom path supported, one click to reveal the backup folder in Explorer
+- **Per-vault isolation**: vault-dedicated data dir (`%LOCALAPPDATA%\dsh-obsidian\<vaultHash>`) keeps notes clean, skips OneDrive sync, and separates sessions between vaults completely
+- **Kernel version of your choice**: pick the **stable** or **alpha experience** channel in settings; check updates per channel; install only after confirmation — startup never touches the network to change versions
+- **Registry mirror fallback**: npm official source fails → auto-switches to the npmmirror mirror (friendlier on mainland networks)
+- **Visible install progress**: persistent global notice with elapsed-time ticker, plus clear success/failure result — no more "did it actually install?"
+- **Model config once, used everywhere**: one-way sync of providers & API credentials from your main DSH to every vault — add a vendor/key once, no per-vault re-setup
+- **Diagnosable startup failures**: real logs with error tail on failure; stale process trees are cleaned up on timeout — not just a bare "startup timed out"
 
 ## Requirements
 
 - Obsidian desktop (v1.4+, Windows)
-- [Node.js](https://nodejs.org) — the plugin detects it at startup and shows a download link in the panel if missing
+- [Node.js](https://nodejs.org) — detected at startup; the panel shows a download link if missing
 
 ## Install
 
@@ -29,74 +45,80 @@ Settings → Community plugins → Browse → search "DSH for Vaults" → Instal
 2. Place them in `<your-vault>\.obsidian\plugins\dsh-ob\`
 3. Restart Obsidian → Settings → Community plugins → enable "DSH for Vaults"
 
-## Usage
+## Quick start
 
-1. Click the whale icon in the left ribbon (or run "Open DSH panel" from Ctrl+P)
-2. Wait for startup — the panel shows "Starting @ port …", then loads the DSH UI with your vault as the active workspace (first launch ~10-30 s while npx installs the package)
-3. Start chatting to manage your notes with AI
-4. The status bar (bottom-left) shows the current instance state (`DSH: running @ 3090`)
+1. **Open the panel**: whale icon in the left ribbon, or Ctrl+P → "Open DSH panel"
+2. **Wait for startup**: the panel shows "Starting @ port …", then loads the DSH UI with your vault as the workspace (first launch ~10–30 s while npx installs the kernel)
+3. **Chat**: the active workspace is your vault — manage notes with AI right away
+4. **Status bar**: bottom-left shows the instance state (`DSH: running @ 3090`)
 
-## Features
+## Kernel versions & update policy
 
-- One DSH instance per vault: isolated workspaces and chat histories
-- The vault root is registered as the default workspace — no manual setup
-- DSH server starts/stops with Obsidian (configurable)
-- Session data lives outside the vault (in `%LOCALAPPDATA%`), so notes stay clean
-- DSH's built-in workspace switcher still works — you can reference other directories when needed
+**No auto-updates, by default.** Startup only uses locally installed kernel versions (picks the highest one) and never goes online to change versions.
 
-## Settings
+When you want a new version — Settings → "dsh version update":
 
-| Setting | Description |
-|---------|-------------|
-| dsh executable path | Leave empty for auto-detection (npm global → npx cache → online npx); only fill in manually if auto-detect fails |
-| Base port | Starting port for each vault (default 3090, avoids the common desktop port 3080) |
-| Auto-start on Obsidian open | Automatically starts the vault's DSH instance when Obsidian opens |
-| Stop instance on Obsidian close | Stops the process on close; disable to keep it running in background for faster re-launch |
-| Panel location | Right sidebar / Left sidebar / Tab |
+| Channel | What it tracks |
+|---------|----------------|
+| **Stable** | npm official channel (`latest`) — whatever the official release is |
+| **alpha experience** | npm preview channel (`alpha`) — newest capabilities (e.g. the browser-auth Web UI) |
+
+- Pick a channel → "Check update" → confirm the popup → install (progress fully visible)
+- Upgrading from older kernels to alpha **auto-migrates session data and backs it up first** — history survives
+- Flaky network? Auto-falls back to the npmmirror mirror for queries and downloads
 
 ## Multi-vault behavior (one instance per vault)
 
 | Scenario | Behavior |
 |----------|----------|
-| Open vault A (first time) | Assigns a deterministic port, starts DSH with A as workspace |
-| Open vault B at the same time | Fully independent: different port, process, workspace, and sessions |
+| Open vault A (first time) | Deterministic port (hash + collision bump), starts DSH with A as workspace |
+| Open vault B at the same time | Fully independent: different port, process, workspace and sessions |
 | Same vault in two windows | Shares the same instance (same port), no duplicate startup |
-| Close vault B's window | Stops the instance on close; session history preserved in `%USERPROFILE%\.dsh` |
+| Close vault B's window | Stops the instance on close; history kept in the vault's dedicated data dir |
 | Re-open vault B | Re-launches on the same port; history is still there |
-| Port occupied / manual DSH running | Only manages its own instances; finds a free port instead of touching manual ones |
+| Port taken / manual DSH running | Only manages its own instances; finds a free port instead of touching manual ones |
 
-## Shared model configuration (one-time setup, used everywhere)
+## Shared model configuration (set up once, used everywhere)
 
 Your **main DSH** (e.g. the desktop instance at `http://127.0.0.1:3080`, whose data lives in `~/.dsh`) is the **single source of truth** for model *infrastructure*. On every vault instance startup, the plugin one-way syncs from the main instance to that vault:
 
 - **LLM providers** (`llm-pi-ai` and `llm-deepseek` namespaces in `settings.yaml`: base URLs, model lists, routes)
 - **API credentials** (`.credentials.yaml`)
 
-So if you add a new model vendor or API key in the 3080 instance, just open (or reopen) any vault panel and it's available there too — **no need to re-add it per vault**. The sync runs on every panel open, so even an already-running instance picks up the new vendor/key (DSH hot-reloads `settings.yaml`).
+Add a new vendor or API key once, then just open (or reopen) any vault panel — available everywhere, no per-vault re-setup (DSH hot-reloads `settings.yaml`).
 
 **Not synced on purpose** — each vault keeps its own choice:
 
-- **Default model route** (`agent-default-model`): e.g. main uses DeepSeek, a vault uses GPT/MiMo — the vault keeps its own default.
-- **Search model** (`web-search-deepseek`): each vault may use its own search model.
+- **Default model route** (`agent-default-model`): e.g. main uses DeepSeek, a vault uses GPT/MiMo
+- **Search model** (`web-search-deepseek`): each vault may use its own search model
+- **Plugin systems** (`profiles` / node_modules): different vaults can use different plugin sets
 
-How conflicts are handled (read carefully):
+Conflict handling: provider/credential dictionaries use a **union merge** (vault-only entries kept, shared entries overridden by main, main-only entries added); direction is strictly **main → vault, one-way** — changes inside a vault never write back to the main instance.
 
-- **Union merge** for provider / credential dictionaries: an entry that exists only in a vault is **kept**; an entry on both sides is overridden by the main instance's version; an entry added on the main side is added to the vault.
-- Direction is **main → vault, one-way**: changes you make *inside* a vault's DSH are **not** written back to the main instance (prevents multiple ends from overwriting each other). If you want a vendor/key available everywhere, add it in the main/desktop instance.
-- **Plugin systems (`profiles` / node_modules) are NOT synced** — each vault keeps its own plugin set, so different vaults can use different plugins freely.
+## Data & privacy
 
-## DSH kernel upgrade
+- The plugin is a **launcher + embedded client**: no DSH implementation bundled, talks to DSH only over localhost (127.0.0.1), no telemetry, no relay
+- Session history, model config and API credentials live in the vault's dedicated local dir (`%LOCALAPPDATA%\dsh-obsidian\`) — outside your vault, never synced
+- DSH itself makes outbound requests (model APIs etc.) as needed, determined by your tasks
 
-- Zero coupling to DSH internals: upgrade DSH → restart the panel and you're on the new kernel. **No plugin update needed.**
-- **Auto-updates by default**: runs `npx --yes @deepseek-ai/dsh` on each launch, checking for new versions automatically.
-- **Lock a version**: set the "dsh executable path" setting to a local fixed installation.
+## Settings
+
+| Setting | Description |
+|---------|-------------|
+| dsh executable path | Leave empty for auto-detection (npm global → managed dir → npx cache → online npx); fill manually only if detection fails |
+| dsh version update | Channel dropdown (stable / alpha experience) + check-update button; installs only after confirmation |
+| Data backup dir | Old data backed up here before migration; empty = default dir (path shown), 📁 reveals the folder in Explorer |
+| Base port | Port pool start (default 3090, avoids the common desktop port 3080) |
+| Auto-start on Obsidian open | Starts the vault's instance automatically |
+| Stop instance on Obsidian close | Frees memory on close; disable to keep it resident for instant relaunch |
+| Panel location | Right sidebar / Left sidebar / Tab |
 
 ## FAQ
 
-- **Startup timeout**: verify Node.js is installed; fill in the "dsh executable path" with the output of `where dsh.cmd` (or npm global path `%APPDATA%\npm\dsh.cmd`)
-- **Blank panel**: confirm the status bar says "running"; if still blank try restarting Obsidian
+- **Startup timeout**: verify Node.js is installed; set "dsh executable path" to the output of `where dsh.cmd` (or npm global path `%APPDATA%\npm\dsh.cmd`)
+- **Blank panel**: confirm the status bar says "running"; if still blank, restart Obsidian
 - **Slow first launch**: expected — npx downloads the DSH package; subsequent launches are instant
-- **Old status after switching vaults**: each vault has its own instance; status bar shows the instance for the current window's vault
+- **Old status after switching vaults**: each vault has its own instance; the status bar shows the current window's instance
 
 ## Development
 

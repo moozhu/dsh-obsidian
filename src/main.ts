@@ -767,17 +767,27 @@ function runNpm(args: string[], timeoutMs: number): Promise<string | null> {
   });
 }
 
+/** 内核版本通道：stable = npm latest（官方正式通道），alpha = npm alpha（预览通道）。 */
+type DshChannel = "stable" | "alpha";
+
+/** npm 镜像 registry（官方源被墙/不稳时的兜底，大陆网络下载更稳）。 */
+const NPM_MIRROR_REGISTRY = "https://registry.npmmirror.com";
+
 /**
- * 查询 registry 最新版。先走用户 npm 配置（代理/镜像）；
- * 配置链路失败（如本地代理软件没启动，连接挂死）时直连兜底。
+ * 按通道查询 registry 最新版。先走用户 npm 配置（代理/镜像）；
+ * 配置链路失败（如本地代理软件没启动，连接挂死）时直连兜底；
+ * 直连仍失败时切 npmmirror 镜像 registry 兜底。
  */
-async function fetchLatestVersion(): Promise<string | null> {
-  const viaConfig = await runNpm(["view", "@deepseek-ai/dsh", "version"], 15_000);
+async function fetchChannelVersion(channel: DshChannel): Promise<string | null> {
+  const tag = channel === "stable" ? "dist-tags.latest" : "dist-tags.alpha";
+  const viaConfig = await runNpm(["view", "@deepseek-ai/dsh", tag], 15_000);
   if (viaConfig) return viaConfig;
-  return runNpm(
-    ["--proxy", "null", "--https-proxy", "null", "view", "@deepseek-ai/dsh", "version"],
+  const direct = await runNpm(
+    ["--proxy", "null", "--https-proxy", "null", "view", "@deepseek-ai/dsh", tag],
     15_000
   );
+  if (direct) return direct;
+  return runNpm(["--registry", NPM_MIRROR_REGISTRY, "view", "@deepseek-ai/dsh", tag], 15_000);
 }
 
 /** 后台安装 @latest 到临时目录，校验版本后提升为管理目录；失败不留半成品。 */
@@ -802,7 +812,8 @@ async function installLatestToManaged(latest: string): Promise<boolean> {
   ];
   const ok =
     (await runNpm(installArgs, 120_000)) !== null ||
-    (await runNpm(["--proxy", "null", "--https-proxy", "null", ...installArgs], 600_000)) !== null;
+    (await runNpm(["--proxy", "null", "--https-proxy", "null", ...installArgs], 600_000)) !== null ||
+    (await runNpm(["--registry", NPM_MIRROR_REGISTRY, ...installArgs], 600_000)) !== null;
   const installedVersion = readDshVersion(join(tmp, "node_modules", "@deepseek-ai", "dsh", "package.json"));
   const valid = ok && installedVersion === latest && existsSync(join(tmp, "node_modules", ".bin", "dsh.cmd"));
   if (!valid) {
@@ -824,19 +835,19 @@ async function installLatestToManaged(latest: string): Promise<boolean> {
 
 type UpdateCheckResult =
   | { kind: "error" }
-  | { kind: "up-to-date"; version: string }
+  | { kind: "up-to-date"; version: string; latest: string }
   | { kind: "update-available"; latest: string; current: string | null };
 
 /**
- * 只查询官方最新版并与本地最高版本比较，绝不自动下载/安装。
- * 是否安装交由用户在设置页确认（决定权交给用户）。
+ * 按通道只查询最新版（stable = npm latest 官方正式通道；alpha = npm alpha 预览通道）
+ * 并与本地最高版本比较，绝不自动下载/安装。是否安装交由用户在设置页确认（决定权交给用户）。
  */
-async function checkForUpdate(): Promise<UpdateCheckResult> {
-  const latest = await fetchLatestVersion();
+async function checkForUpdate(channel: DshChannel): Promise<UpdateCheckResult> {
+  const latest = await fetchChannelVersion(channel);
   if (!latest) return { kind: "error" };
   const best = pickBestInstall(detectDshInstalls());
   if (best?.version && compareSemver(latest, best.version) <= 0) {
-    return { kind: "up-to-date", version: best.version };
+    return { kind: "up-to-date", version: best.version, latest };
   }
   return { kind: "update-available", latest, current: best?.version ?? null };
 }
@@ -1132,38 +1143,82 @@ class DshSettingTab extends PluginSettingTab {
       );
 
     const best = pickBestInstall(detectDshInstalls());
+    let channel: DshChannel = "stable";
+    const channelLabel = (c: DshChannel) => (c === "stable" ? "稳定版" : "alpha 体验版");
     const updateSetting = new Setting(containerEl)
       .setName("dsh 版本更新")
       .setDesc(
         best?.version
-          ? `当前使用本地 ${best.version}。默认使用本地已安装版本；只有你点击「检查更新」才联网查询，发现新版需确认后才安装。`
+          ? `当前使用本地 ${best.version}。选择通道后点「检查更新」才联网查询（稳定版 = npm 官方正式通道，alpha 体验版 = 官方预览通道），发现新版需确认后才安装。`
           : "未检测到本地 dsh，首次启动将 npx 在线安装。默认不自动升级，可手动检查更新。"
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOption("stable", "稳定版")
+          .addOption("alpha", "alpha 体验版")
+          .setValue("stable")
+          .onChange((value) => {
+            channel = value as DshChannel;
+          })
       )
       .addButton((btn) =>
         btn.setButtonText("检查更新").onClick(async () => {
           btn.setDisabled(true);
-          updateSetting.setDesc("正在检查最新版本 ...");
-          const result = await checkForUpdate();
+          updateSetting.setDesc(`正在检查${channelLabel(channel)}通道最新版本 ...`);
+          const result = await checkForUpdate(channel);
           if (result.kind === "error") {
-            updateSetting.setDesc("检查失败：无法访问 registry（网络/代理问题），保持当前版本。");
+            updateSetting.setDesc(
+              channel === "alpha"
+                ? "检查失败：无法访问 registry，或 alpha 通道暂无可用版本，保持当前版本。"
+                : "检查失败：无法访问 registry（网络/代理问题），保持当前版本。"
+            );
           } else if (result.kind === "up-to-date") {
-            updateSetting.setDesc(`已是最新（本地 ${result.version}）。`);
+            updateSetting.setDesc(
+              result.version !== result.latest
+                ? `${channelLabel(channel)}通道最新 ${result.latest}，本地 ${result.version} 更高，无需更新。`
+                : `已是最新（${result.latest}）。`
+            );
           } else {
             const { latest, current } = result;
-            updateSetting.setDesc(`发现新版 ${latest}${current ? `（当前 ${current}）` : ""}，等待确认。`);
-            const notice = new Notice(`发现 dsh 新版本 ${latest}，是否安装？`, 0);
+            updateSetting.setDesc(
+              `${channelLabel(channel)}通道发现新版 ${latest}${current ? `（当前 ${current}）` : ""}，等待确认。`
+            );
+            const notice = new Notice(
+              channel === "alpha"
+                ? `发现 alpha 体验版 ${latest}，是否安装？（升级会自动迁移会话数据，历史不丢）`
+                : `发现稳定版新版本 ${latest}，是否安装？`,
+              0
+            );
             const frag = new DocumentFragment();
             const yes = frag.createEl("button", { text: "安装" });
             const no = frag.createEl("button", { text: "取消" });
             yes.onclick = async () => {
               notice.hide();
               updateSetting.setDesc(`正在安装 dsh ${latest} ...`);
-              const ok = await installLatestToManaged(latest);
-              updateSetting.setDesc(
-                ok
-                  ? `dsh ${latest} 已就绪，下次打开面板自动启用。`
-                  : "安装失败，保持当前版本，请稍后重试。"
-              );
+              // 全局持续提示：不依赖设置页可见，用户关闭设置页也能看到安装进行中；
+              // 周期刷新等待时长，避免误以为卡死。安装完成/失败后再给出结果提示。
+              const installing = new Notice(`正在安装 dsh ${latest}（下载依赖，约需 1-2 分钟，请勿关闭 Obsidian）...`, 0);
+              const startAt = Date.now();
+              const ticker = window.setInterval(() => {
+                const secs = Math.round((Date.now() - startAt) / 1000);
+                installing.setMessage(
+                  `正在安装 dsh ${latest}（已等待 ${secs}s，下载依赖中，请勿关闭 Obsidian）...`
+                );
+              }, 5_000);
+              let ok = false;
+              try {
+                ok = await installLatestToManaged(latest);
+              } finally {
+                window.clearInterval(ticker);
+                installing.hide();
+              }
+              if (ok) {
+                new Notice(`dsh ${latest} 安装完成，下次打开面板自动启用。`, 10_000);
+                updateSetting.setDesc(`dsh ${latest} 已就绪，下次打开面板自动启用。`);
+              } else {
+                new Notice(`dsh ${latest} 安装失败，保持当前版本，请稍后重试。`, 10_000);
+                updateSetting.setDesc("安装失败，保持当前版本，请稍后重试。");
+              }
             };
             no.onclick = () => {
               notice.hide();
