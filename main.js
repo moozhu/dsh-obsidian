@@ -7419,6 +7419,34 @@ function httpProbe(port, timeoutMs, checkBody) {
 function probeAnyHttp(port, timeoutMs = 2e3) {
   return httpProbe(port, timeoutMs, null);
 }
+function probeUrl(url, timeoutMs = 3e3) {
+  return new Promise((resolve) => {
+    const req = (0, import_http.get)(url, (res) => {
+      const sc = res.statusCode ?? 0;
+      res.resume();
+      resolve(sc === 401 || sc === 403 ? "unauthorized" : "ok");
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy();
+      resolve("fail");
+    });
+    req.on("error", () => resolve("fail"));
+  });
+}
+function killPortOwner(port) {
+  try {
+    (0, import_child_process.execFileSync)(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`
+      ],
+      { windowsHide: true, stdio: "ignore", timeout: 1e4 }
+    );
+  } catch {
+  }
+}
 function parseWebUrl(log) {
   const m = /dsh web:\s+(https?:\/\/[^\s]+)/.exec(log);
   return m ? m[1] : null;
@@ -7506,6 +7534,24 @@ function detectDshInstalls() {
       }
     } catch {
     }
+  }
+  try {
+    const out = (0, import_child_process.execFileSync)("cmd.exe", ["/d", "/s", "/c", "where dsh"], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+      timeout: 5e3
+    });
+    for (const line of out.split(/\r?\n/)) {
+      const cmd = line.trim();
+      if (!cmd || !cmd.toLowerCase().endsWith(".cmd")) continue;
+      if (installs.some((i) => i.cmd.toLowerCase() === cmd.toLowerCase())) continue;
+      const root = (0, import_path.dirname)((0, import_path.dirname)(cmd));
+      const pkg = (0, import_path.join)(root, "node_modules", "@deepseek-ai", "dsh", "package.json");
+      if (!(0, import_fs.existsSync)(pkg)) continue;
+      installs.push({ cmd, version: readDshVersion(pkg) });
+    }
+  } catch {
   }
   return installs;
 }
@@ -7937,9 +7983,16 @@ var InstanceManager = class {
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
     syncModelConfig(vaultHome(vaultPath));
-    if (record && await probeAnyHttp(record.port)) {
-      onState?.(`\u8FD0\u884C\u4E2D @ ${record.port}`);
-      return { port: record.port, url: record.url ?? `http://127.0.0.1:${record.port}/` };
+    if (record) {
+      const recordedUrl = record.url ?? `http://127.0.0.1:${record.port}/`;
+      const probe = await probeUrl(recordedUrl);
+      if (probe === "ok") {
+        onState?.(`\u8FD0\u884C\u4E2D @ ${record.port}`);
+        return { port: record.port, url: recordedUrl };
+      }
+      if (await probeAnyHttp(record.port)) {
+        killPortOwner(record.port);
+      }
     }
     if (!await probeNode()) {
       throw new BootError("\u672A\u68C0\u6D4B\u5230 Node.js\uFF08DSH \u4F9D\u8D56\u5B83\u8FD0\u884C\uFF09", true);
@@ -7956,24 +8009,35 @@ var InstanceManager = class {
       migrateSessionProjectionCache(dshHome, backupDir);
     }
     seedWorkspace(dshHome, vaultPath);
-    onState?.(`\u6B63\u5728\u542F\u52A8 @ ${port} ...`);
+    onState?.(
+      npxOnly ? `\u6B63\u5728\u4E0B\u8F7D\u5B89\u88C5 dsh \u5185\u6838\uFF08\u9996\u6B21\u5728\u7EBF\u5B89\u88C5\uFF0C\u7EA6\u9700 1-5 \u5206\u949F\uFF09...` : `\u6B63\u5728\u542F\u52A8 @ ${port} ...`
+    );
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
     const getLog = () => child?.__getLog?.() ?? "";
+    const startAt = Date.now();
+    let ticker;
+    if (npxOnly) {
+      ticker = window.setInterval(() => {
+        const secs = Math.round((Date.now() - startAt) / 1e3);
+        onState?.(`\u6B63\u5728\u4E0B\u8F7D\u5B89\u88C5 dsh \u5185\u6838\uFF08\u5DF2\u7B49\u5F85 ${secs}s\uFF0C\u9996\u6B21\u5B89\u88C5\u7EA6\u9700 1-5 \u5206\u949F\uFF09...`);
+      }, 1e4);
+    }
     let url;
     try {
-      url = (await waitForDsh(port, npxOnly ? 3e5 : 12e4, getLog)).url;
+      url = (await waitForDsh(port, 6e4, getLog)).url;
     } catch (e) {
       if (child?.pid) stopProcess(child.pid);
       const log = getLog();
       const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(
-        `${msg}
+      const hint = npxOnly ? "\u63D0\u793A\uFF1A\u9996\u6B21\u5728\u7EBF\u5B89\u88C5\u4E0B\u8F7D\u8F83\u6162\uFF0C\u53EF\u80FD\u672A\u5728 60 \u79D2\u5185\u5B8C\u6210\u2014\u2014\u8BF7\u91CD\u8BD5\u4E00\u6B21\uFF08\u4E0B\u8F7D\u8FDB\u5EA6\u4F1A\u4FDD\u7559\uFF09\uFF0C\u6216\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5\u3002" : "\u63D0\u793A\uFF1A\u53EF\u5728\u7EC8\u7AEF\u8FDB\u5165\u5E93\u76EE\u5F55\u6267\u884C  npx --yes @deepseek-ai/dsh web --port <\u7AEF\u53E3>  \u67E5\u770B\u5B8C\u6574\u62A5\u9519\u3002";
+      throw new Error(`${msg}
 
 --- dsh \u542F\u52A8\u8F93\u51FA\uFF08\u672B\u5C3E 3000 \u5B57\u7B26\uFF09---
 ${log.slice(-3e3) || "\uFF08\u65E0\u8F93\u51FA\uFF09"}
-\u63D0\u793A\uFF1A\u53EF\u5728\u7EC8\u7AEF\u8FDB\u5165\u5E93\u76EE\u5F55\u6267\u884C  npx --yes @deepseek-ai/dsh web --port <\u7AEF\u53E3>  \u67E5\u770B\u5B8C\u6574\u62A5\u9519\u3002`
-      );
+` + hint);
+    } finally {
+      if (ticker !== void 0) window.clearInterval(ticker);
     }
     const finalUrl = url ?? `http://127.0.0.1:${port}/`;
     settings.instances[vaultPath] = { port, pid, url: finalUrl };
@@ -8008,36 +8072,25 @@ var DshView = class extends import_obsidian.ItemView {
   async onOpen() {
     this.contentEl.empty();
     this.contentEl.addClass("dsh-view");
+    await this.loadPanel();
+  }
+  /**
+   * 启动（或复用）并加载面板。
+   * 加载期间状态文本保持可见；webview/iframe 加载失败或 60 秒超时时显示错误视图 + 重启按钮，
+   * 绝不静默空白（修复"端口上是半死服务/换过内核 → 面板纯白无提示"的事故）。
+   */
+  async loadPanel() {
+    this.contentEl.empty();
     const status = this.contentEl.createDiv({ cls: "dsh-status" });
     status.setText("\u6B63\u5728\u542F\u52A8 DSH ...");
     const vaultPath = this.app.vault.adapter.getBasePath();
+    let url;
     try {
-      const { url } = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
+      const result = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
         status.setText(state);
         this.plugin.updateStatusBar(state);
       });
-      status.remove();
-      if (/\?token=/.test(url)) {
-        const wv = this.contentEl.createEl(
-          "webview",
-          { cls: "dsh-frame" }
-        );
-        wv.setAttribute("src", url);
-        wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
-        wv.addEventListener("did-fail-load", () => {
-          this.contentEl.empty();
-          const err = this.contentEl.createDiv({ cls: "dsh-status" });
-          err.setText(
-            "\u65E0\u6CD5\u5185\u5D4C DSH\uFF1A\u5F53\u524D Obsidian \u672A\u542F\u7528 webview \u7EC4\u4EF6\u3002\n\u53EF\u70B9\u51FB\u4E0B\u65B9\u94FE\u63A5\u5728\u6D4F\u89C8\u5668\u6253\u5F00\uFF0C\u6216\u5411\u63D2\u4EF6\u4F5C\u8005\u53CD\u9988\u3002"
-          );
-          const link = err.createEl("a", { text: "\u5728\u6D4F\u89C8\u5668\u6253\u5F00 DSH", href: url });
-          link.setAttr("target", "_blank");
-          link.setAttr("rel", "noopener");
-        });
-      } else {
-        const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
-        frame.setAttr("src", url);
-      }
+      url = result.url;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       status.setText(`\u542F\u52A8\u5931\u8D25\uFF1A${message}`);
@@ -8052,6 +8105,51 @@ var DshView = class extends import_obsidian.ItemView {
       }
       this.plugin.updateStatusBar("\u542F\u52A8\u5931\u8D25");
       new import_obsidian.Notice(`DSH \u542F\u52A8\u5931\u8D25\uFF1A${message}`, 1e4);
+      return;
+    }
+    const showError = (hint) => {
+      this.contentEl.empty();
+      const err = this.contentEl.createDiv({ cls: "dsh-status" });
+      err.setText(hint);
+      const btn = err.createEl("button", { text: "\u91CD\u542F DSH \u670D\u52A1" });
+      btn.onclick = () => void this.loadPanel();
+    };
+    status.setText("\u5DF2\u8FDE\u63A5\uFF0C\u6B63\u5728\u52A0\u8F7D\u754C\u9762 ...");
+    let settled = false;
+    const timeoutTimer = window.setTimeout(() => {
+      if (!settled) {
+        showError("DSH \u754C\u9762\u52A0\u8F7D\u8D85\u65F6\uFF0860 \u79D2\uFF09\uFF0C\u670D\u52A1\u53EF\u80FD\u672A\u5C31\u7EEA\u3002\u8BF7\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u91CD\u542F\u670D\u52A1\u3002");
+        this.plugin.updateStatusBar("\u52A0\u8F7D\u8D85\u65F6");
+      }
+    }, 6e4);
+    if (/\?token=/.test(url)) {
+      const wv = this.contentEl.createEl(
+        "webview",
+        { cls: "dsh-frame" }
+      );
+      wv.setAttribute("src", url);
+      wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
+      wv.addEventListener("did-finish-load", () => {
+        settled = true;
+        window.clearTimeout(timeoutTimer);
+        status.remove();
+      });
+      wv.addEventListener("did-fail-load", (e) => {
+        settled = true;
+        window.clearTimeout(timeoutTimer);
+        const code = e.errorCode;
+        if (code === -3) return;
+        showError("DSH \u754C\u9762\u52A0\u8F7D\u5931\u8D25\uFF08webview \u9519\u8BEF\uFF09\u3002\u8BF7\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u91CD\u542F\u670D\u52A1\u3002");
+        this.plugin.updateStatusBar("\u52A0\u8F7D\u5931\u8D25");
+      });
+    } else {
+      const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
+      frame.setAttr("src", url);
+      frame.addEventListener("load", () => {
+        settled = true;
+        window.clearTimeout(timeoutTimer);
+        status.remove();
+      });
     }
   }
 };

@@ -9,7 +9,7 @@ import {
   Setting,
   WorkspaceLeaf,
 } from "obsidian";
-import { spawn, type ChildProcess } from "child_process";
+import { execFileSync, spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
 import { get } from "http";
@@ -124,6 +124,44 @@ function probeAnyHttp(port: number, timeoutMs = 2000): Promise<boolean> {
 /** 端口上是否有一个可识别的 DSH 实例（响应体含品牌特征）。 */
 function probeDsh(port: number, timeoutMs = 3000): Promise<boolean> {
   return httpProbe(port, timeoutMs, (body) => body.includes("DeepSeek Harness"));
+}
+
+/**
+ * URL 有效性三态探测（复用判定用）：
+ * - ok：服务健康，记录里的 URL 仍可直接加载；
+ * - unauthorized：服务活着但 URL 凭证已失效（典型：记录是 rc 时代无 token 的 URL，端口上已换成需要 token 的 alpha）；
+ * - fail：不可达 / 半死服务。
+ */
+function probeUrl(url: string, timeoutMs = 3000): Promise<"ok" | "unauthorized" | "fail"> {
+  return new Promise((resolve) => {
+    const req = get(url, (res) => {
+      const sc = res.statusCode ?? 0;
+      res.resume();
+      resolve(sc === 401 || sc === 403 ? "unauthorized" : "ok");
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy();
+      resolve("fail");
+    });
+    req.on("error", () => resolve("fail"));
+  });
+}
+
+/** 杀掉占用指定端口的监听进程（复用判定失败后清理旧实例，避免它继续占端口）。 */
+function killPortOwner(port: number): void {
+  try {
+    execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`,
+      ],
+      { windowsHide: true, stdio: "ignore", timeout: 10_000 }
+    );
+  } catch {
+    // 清理失败不阻塞重启流程
+  }
 }
 
 /** 从 dsh 的 stdout 里解析它自宣的 Web 地址（rc 无 token，alpha 带 ?token=）。 */
@@ -248,6 +286,29 @@ function detectDshInstalls(): DshInstall[] {
       // 目录不可读时忽略
     }
   }
+
+  // PATH 中的全局 dsh（覆盖 npm 全局之外的安装方式，如 pnpm / 手动全局链接）。
+  // 之前这类安装探测不到，插件会误以为"本地没装过"而走 npx 在线下载，白白等一次冷安装。
+  try {
+    const out = execFileSync("cmd.exe", ["/d", "/s", "/c", "where dsh"], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    for (const line of out.split(/\r?\n/)) {
+      const cmd = line.trim();
+      if (!cmd || !cmd.toLowerCase().endsWith(".cmd")) continue;
+      if (installs.some((i) => i.cmd.toLowerCase() === cmd.toLowerCase())) continue;
+      const root = dirname(dirname(cmd)); // <root>\node_modules\.bin\dsh.cmd → <root>
+      const pkg = join(root, "node_modules", "@deepseek-ai", "dsh", "package.json");
+      if (!existsSync(pkg)) continue;
+      installs.push({ cmd, version: readDshVersion(pkg) });
+    }
+  } catch {
+    // where 失败 = PATH 里没有 dsh
+  }
+
   return installs;
 }
 
@@ -885,10 +946,21 @@ class InstanceManager {
     //    运行中的 DSH 会在 settings.yaml 写回后热重载，下次请求即可用上新配置。
     syncModelConfig(vaultHome(vaultPath));
 
-    // 1. 复用：之前记录过且端口上确实有 HTTP 服务（dsh 自占的端口，rc 与 alpha 均适用）
-    if (record && (await probeAnyHttp(record.port))) {
-      onState?.(`运行中 @ ${record.port}`);
-      return { port: record.port, url: record.url ?? `http://127.0.0.1:${record.port}/` };
+    // 1. 复用：记录过的 URL 仍然有效才复用。
+    //    只探测端口会被"半死服务 / 换过内核"误导——典型事故：记录是 rc 时代无 token 的 URL，
+    //    端口上已换成需要 token 的 alpha → 面板 401 空白。URL 有效才复用；
+    //    401/403（凭证失效）或不可达 → 杀掉残留、重新启动拿新 URL（token 自动刷新）。
+    if (record) {
+      const recordedUrl = record.url ?? `http://127.0.0.1:${record.port}/`;
+      const probe = await probeUrl(recordedUrl);
+      if (probe === "ok") {
+        onState?.(`运行中 @ ${record.port}`);
+        return { port: record.port, url: recordedUrl };
+      }
+      if (await probeAnyHttp(record.port)) {
+        // 端口上还有服务但 URL 无效：清掉旧实例，避免它继续占着端口
+        killPortOwner(record.port);
+      }
     }
 
     // 2. 前置检查：Node.js（npx 依赖）
@@ -911,24 +983,39 @@ class InstanceManager {
       migrateSessionProjectionCache(dshHome, backupDir);
     }
     seedWorkspace(dshHome, vaultPath);
-    onState?.(`正在启动 @ ${port} ...`);
+    onState?.(
+      npxOnly
+        ? `正在下载安装 dsh 内核（首次在线安装，约需 1-5 分钟）...`
+        : `正在启动 @ ${port} ...`
+    );
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
     const getLog = () =>
       (child as unknown as { __getLog?: () => string } | undefined)?.__getLog?.() ?? "";
+    // npx 冷安装期间周期刷新等待时长，面板不会像卡死一样毫无反馈
+    const startAt = Date.now();
+    let ticker: number | undefined;
+    if (npxOnly) {
+      ticker = window.setInterval(() => {
+        const secs = Math.round((Date.now() - startAt) / 1000);
+        onState?.(`正在下载安装 dsh 内核（已等待 ${secs}s，首次安装约需 1-5 分钟）...`);
+      }, 10_000);
+    }
     let url: string | null;
     try {
-      // 本地副本通常十几秒就绪；npx 冷安装要拉整棵依赖树，给足时间避免误杀
-      url = (await waitForDsh(port, npxOnly ? 300_000 : 120_000, getLog)).url;
+      // 超时统一 60 秒：本地副本十几秒就绪；npx 慢网装不完则快速失败并提示重试（npx 下载进度会保留）
+      url = (await waitForDsh(port, 60_000, getLog)).url;
     } catch (e) {
       // 启动失败：杀掉残留子进程树，避免留下孤儿 dsh 占着端口（这也是反复超时的一大根因）
       if (child?.pid) stopProcess(child.pid);
       const log = getLog();
       const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(
-        `${msg}\n\n--- dsh 启动输出（末尾 3000 字符）---\n${log.slice(-3000) || "（无输出）"}\n` +
-          "提示：可在终端进入库目录执行  npx --yes @deepseek-ai/dsh web --port <端口>  查看完整报错。"
-      );
+      const hint = npxOnly
+        ? "提示：首次在线安装下载较慢，可能未在 60 秒内完成——请重试一次（下载进度会保留），或检查网络后重试。"
+        : "提示：可在终端进入库目录执行  npx --yes @deepseek-ai/dsh web --port <端口>  查看完整报错。";
+      throw new Error(`${msg}\n\n--- dsh 启动输出（末尾 3000 字符）---\n${log.slice(-3000) || "（无输出）"}\n` + hint);
+    } finally {
+      if (ticker !== undefined) window.clearInterval(ticker);
     }
 
     const finalUrl = url ?? `http://127.0.0.1:${port}/`;
@@ -976,42 +1063,28 @@ class DshView extends ItemView {
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass("dsh-view");
+    await this.loadPanel();
+  }
 
+  /**
+   * 启动（或复用）并加载面板。
+   * 加载期间状态文本保持可见；webview/iframe 加载失败或 60 秒超时时显示错误视图 + 重启按钮，
+   * 绝不静默空白（修复"端口上是半死服务/换过内核 → 面板纯白无提示"的事故）。
+   */
+  private async loadPanel(): Promise<void> {
+    this.contentEl.empty();
     const status = this.contentEl.createDiv({ cls: "dsh-status" });
     status.setText("正在启动 DSH ...");
 
     const vaultPath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
 
+    let url: string;
     try {
-      const { url } = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
+      const result = await this.plugin.manager.ensureRunning(vaultPath, (state) => {
         status.setText(state);
         this.plugin.updateStatusBar(state);
       });
-      status.remove();
-
-      // 0.1.2+ 浏览器鉴权版：SameSite=Strict cookie 在跨站 iframe 里不发送（实测 401）。
-      // 改用 Electron <webview>：独立渲染进程，guest 内的顶层导航下 cookie 正常发送。
-      if (/\?token=/.test(url)) {
-        const wv = this.contentEl.createEl(
-          "webview" as unknown as keyof HTMLElementTagNameMap,
-          { cls: "dsh-frame" }
-        ) as unknown as HTMLElement;
-        wv.setAttribute("src", url);
-        wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
-        wv.addEventListener("did-fail-load", () => {
-          this.contentEl.empty();
-          const err = this.contentEl.createDiv({ cls: "dsh-status" });
-          err.setText(
-            "无法内嵌 DSH：当前 Obsidian 未启用 webview 组件。\n可点击下方链接在浏览器打开，或向插件作者反馈。"
-          );
-          const link = err.createEl("a", { text: "在浏览器打开 DSH", href: url });
-          link.setAttr("target", "_blank");
-          link.setAttr("rel", "noopener");
-        });
-      } else {
-        const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
-        frame.setAttr("src", url);
-      }
+      url = result.url;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       status.setText(`启动失败：${message}`);
@@ -1026,6 +1099,57 @@ class DshView extends ItemView {
       }
       this.plugin.updateStatusBar("启动失败");
       new Notice(`DSH 启动失败：${message}`, 10000);
+      return;
+    }
+
+    const showError = (hint: string) => {
+      this.contentEl.empty();
+      const err = this.contentEl.createDiv({ cls: "dsh-status" });
+      err.setText(hint);
+      const btn = err.createEl("button", { text: "重启 DSH 服务" });
+      btn.onclick = () => void this.loadPanel();
+    };
+
+    status.setText("已连接，正在加载界面 ...");
+    let settled = false;
+    const timeoutTimer = window.setTimeout(() => {
+      if (!settled) {
+        showError("DSH 界面加载超时（60 秒），服务可能未就绪。请点击下方按钮重启服务。");
+        this.plugin.updateStatusBar("加载超时");
+      }
+    }, 60_000);
+
+    // 0.1.2+ 浏览器鉴权版：SameSite=Strict cookie 在跨站 iframe 里不发送（实测 401）。
+    // 改用 Electron <webview>：独立渲染进程，guest 内的顶层导航下 cookie 正常发送。
+    if (/\?token=/.test(url)) {
+      const wv = this.contentEl.createEl(
+        "webview" as unknown as keyof HTMLElementTagNameMap,
+        { cls: "dsh-frame" }
+      ) as unknown as HTMLElement;
+      wv.setAttribute("src", url);
+      wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
+      wv.addEventListener("did-finish-load", () => {
+        settled = true;
+        window.clearTimeout(timeoutTimer);
+        status.remove();
+      });
+      wv.addEventListener("did-fail-load", (e) => {
+        settled = true;
+        window.clearTimeout(timeoutTimer);
+        // -3 = ABORTED（用户取消/窗口关闭），按正常处理不报错
+        const code = (e as unknown as { errorCode?: number }).errorCode;
+        if (code === -3) return;
+        showError("DSH 界面加载失败（webview 错误）。请点击下方按钮重启服务。");
+        this.plugin.updateStatusBar("加载失败");
+      });
+    } else {
+      const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
+      frame.setAttr("src", url);
+      frame.addEventListener("load", () => {
+        settled = true;
+        window.clearTimeout(timeoutTimer);
+        status.remove();
+      });
     }
   }
 }
