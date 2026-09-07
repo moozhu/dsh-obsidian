@@ -121,10 +121,6 @@ function probeAnyHttp(port: number, timeoutMs = 2000): Promise<boolean> {
   return httpProbe(port, timeoutMs, null);
 }
 
-/** 端口上是否有一个可识别的 DSH 实例（响应体含品牌特征）。 */
-function probeDsh(port: number, timeoutMs = 3000): Promise<boolean> {
-  return httpProbe(port, timeoutMs, (body) => body.includes("DeepSeek Harness"));
-}
 
 /**
  * URL 有效性三态探测（复用判定用）：
@@ -161,6 +157,41 @@ function killPortOwner(port: number): void {
     );
   } catch {
     // 清理失败不阻塞重启流程
+  }
+}
+
+/** 短延时（等进程退出、系统释放文件句柄时用）。 */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => window.setTimeout(r, ms));
+}
+
+/**
+ * 反查监听 127.0.0.1:port 的进程真实 PID（Windows netstat -ano）。
+ * spawn(shell:true) 返回的只是 cmd.exe 包装进程的 pid，真实内核 node 是它的子进程——
+ * 停止/回收与"实例是否还活着"的判断都必须基于真实内核 pid。
+ * netstat 输出随系统代码页变化（如 OEM 936），这里只按 ASCII 地址/数字做正则解析，不依赖表头。
+ */
+function findPortPid(port: number): number | null {
+  try {
+    const out = execFileSync("netstat", ["-ano"], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "buffer",
+      timeout: 10_000, // 与 killPortOwner 一致：netstat 卡死时快速失败，避免阻塞主线程
+    });
+    const text = out.toString("latin1"); // 逐字节直读，规避 OEM 代码页解码问题
+    // 优先 IPv4 回环；仅 [::1] IPv6 监听时以其 PID 兜底
+    const re4 = new RegExp(`^\\s*TCP\\s+127\\.0\\.0\\.1:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)`, "i");
+    const re6 = new RegExp(`^\\s*TCP\\s+\\[::1\\]:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)`, "i");
+    for (const line of text.split(/\r?\n/)) {
+      const m4 = re4.exec(line);
+      if (m4) return Number(m4[1]);
+      const m6 = re6.exec(line);
+      if (m6) return Number(m6[1]);
+    }
+    return null;
+  } catch {
+    return null; // netstat 不可用：调用方回退原 pid
   }
 }
 
@@ -788,11 +819,18 @@ function spawnDsh(bootCommand: string, vaultPath: string): ChildProcess | undefi
   return child;
 }
 
-/** 停止进程及其子进程树。 */
-function stopProcess(pid: number): void {
-  spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
-    windowsHide: true,
-    stdio: "ignore",
+/**
+ * 树杀指定进程（taskkill /pid <pid> /T /F）。
+ * 返回 Promise 在 taskkill 结束时 resolve，便于调用方随后探测端口/等待句柄释放。
+ */
+function stopProcess(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    const child = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    child.on("close", () => resolve());
+    child.on("error", () => resolve()); // taskkill 本身失败（如 pid 已死）不阻塞流程
   });
 }
 
@@ -800,7 +838,15 @@ function stopProcess(pid: number): void {
 
 //#region 后台版本检查与更新
 
-function runNpm(args: string[], timeoutMs: number): Promise<string | null> {
+/**
+ * npm 命令执行结果判别联合：ok=true 表示命令成功（text=stdout.trim()，可为空串）；
+ * ok=false 表示失败（text=stderr 尾部 ≤3000 字符，供上层透出具体错误，可为空串）。
+ * 此前用 null 表示失败，但成功时 stdout 可能为空串 ""、失败时 stderr 可能非空，
+ * 调用方用 `??`/`!== null` 判断会把"成功但无输出"误判为失败、把"失败但有 stderr"误判为成功。
+ */
+type NpmResult = { ok: boolean; text: string };
+
+function runNpm(args: string[], timeoutMs: number): Promise<NpmResult> {
   return new Promise((resolve) => {
     const child = spawn(`npm ${args.join(" ")}`, {
       shell: true,
@@ -808,51 +854,58 @@ function runNpm(args: string[], timeoutMs: number): Promise<string | null> {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
+    let err = "";
     child.stdout?.on("data", (d: Buffer | string) => (out += d.toString()));
+    child.stderr?.on("data", (d: Buffer | string) => (err += d.toString()));
     const timer = window.setTimeout(() => {
       try {
         child.kill();
       } catch {
         // 忽略
       }
-      resolve(null);
+      resolve({ ok: false, text: err.slice(-3000) });
     }, timeoutMs);
     child.on("error", () => {
       window.clearTimeout(timer);
-      resolve(null);
+      resolve({ ok: false, text: err.slice(-3000) });
     });
     child.on("close", (code) => {
       window.clearTimeout(timer);
-      resolve(code === 0 ? out.trim() : null);
+      resolve(code === 0 ? { ok: true, text: out.trim() } : { ok: false, text: err.slice(-3000) });
     });
   });
 }
 
-/** 内核版本通道：stable = npm latest（官方正式通道），alpha = npm alpha（预览通道）。 */
-type DshChannel = "stable" | "alpha";
 
 /** npm 镜像 registry（官方源被墙/不稳时的兜底，大陆网络下载更稳）。 */
 const NPM_MIRROR_REGISTRY = "https://registry.npmmirror.com";
 
 /**
- * 按通道查询 registry 最新版。先走用户 npm 配置（代理/镜像）；
+ * 查询 npm 官方稳定版（dist-tags.latest）最新版本。先走用户 npm 配置（代理/镜像）；
  * 配置链路失败（如本地代理软件没启动，连接挂死）时直连兜底；
  * 直连仍失败时切 npmmirror 镜像 registry 兜底。
  */
-async function fetchChannelVersion(channel: DshChannel): Promise<string | null> {
-  const tag = channel === "stable" ? "dist-tags.latest" : "dist-tags.alpha";
+async function fetchChannelLatest(): Promise<string | null> {
+  const tag = "dist-tags.latest";
+  // runNpm 失败时 ok=false 且 text 为 stderr 尾部（非空），这里必须校验返回值是合法版本号，
+  // 否则会把"失败但 stderr 有内容"误判为查询成功。
   const viaConfig = await runNpm(["view", "@deepseek-ai/dsh", tag], 15_000);
-  if (viaConfig) return viaConfig;
+  if (viaConfig.ok && parseSemver(viaConfig.text)) return viaConfig.text;
   const direct = await runNpm(
     ["--proxy", "null", "--https-proxy", "null", "view", "@deepseek-ai/dsh", tag],
     15_000
   );
-  if (direct) return direct;
-  return runNpm(["--registry", NPM_MIRROR_REGISTRY, "view", "@deepseek-ai/dsh", tag], 15_000);
+  if (direct.ok && parseSemver(direct.text)) return direct.text;
+  const mirror = await runNpm(["--registry", NPM_MIRROR_REGISTRY, "view", "@deepseek-ai/dsh", tag], 15_000);
+  return mirror.ok && parseSemver(mirror.text) ? mirror.text : null;
 }
 
-/** 后台安装 @latest 到临时目录，校验版本后提升为管理目录；失败不留半成品。 */
-async function installLatestToManaged(latest: string): Promise<boolean> {
+/**
+ * 后台安装 @latest 到临时目录，校验版本后提升为管理目录。
+ * 返回 null 表示成功；否则返回明确的中文错误消息（供上层透出）。
+ * 失败后不强行清理 tmp：下次安装会先 rmSync 重建，避免半成品残留影响判断。
+ */
+async function installLatestToManaged(latest: string): Promise<string | null> {
   const target = managedDshDir();
   const tmp = `${target}.tmp`;
   try {
@@ -871,26 +924,48 @@ async function installLatestToManaged(latest: string): Promise<boolean> {
     "--no-fund",
     "--loglevel=error",
   ];
-  const ok =
-    (await runNpm(installArgs, 120_000)) !== null ||
-    (await runNpm(["--proxy", "null", "--https-proxy", "null", ...installArgs], 600_000)) !== null ||
-    (await runNpm(["--registry", NPM_MIRROR_REGISTRY, ...installArgs], 600_000)) !== null;
-  const installedVersion = readDshVersion(join(tmp, "node_modules", "@deepseek-ai", "dsh", "package.json"));
-  const valid = ok && installedVersion === latest && existsSync(join(tmp, "node_modules", ".bin", "dsh.cmd"));
-  if (!valid) {
-    try {
-      rmSync(tmp, { recursive: true, force: true });
-    } catch {
-      // 忽略
+  // 依次尝试：用户 npm 配置（代理/镜像）→ 直连 → npmmirror 镜像。
+  // 逐次独立判断：仅当前次结果 .ok 时继续校验流程；失败记录最近一次 stderr 后尝试下一个。
+  const attempts: Array<{ args: string[]; timeout: number }> = [
+    { args: installArgs, timeout: 120_000 },
+    { args: ["--proxy", "null", "--https-proxy", "null", ...installArgs], timeout: 600_000 },
+    { args: ["--registry", NPM_MIRROR_REGISTRY, ...installArgs], timeout: 600_000 },
+  ];
+  let installErr = "";
+  let installed = false;
+  for (const attempt of attempts) {
+    const r = await runNpm(attempt.args, attempt.timeout);
+    if (r.ok) {
+      installed = true;
+      break;
     }
-    return false;
+    installErr = r.text;
   }
+  if (!installed) {
+    // 三种 registry 链路全失败：透出最后一次 stderr 尾部，提示网络/源问题
+    return `npm 安装失败：${installErr}（npm 网络/源问题）`;
+  }
+  const installedVersion = readDshVersion(join(tmp, "node_modules", "@deepseek-ai", "dsh", "package.json"));
+  const valid = installedVersion === latest && existsSync(join(tmp, "node_modules", ".bin", "dsh.cmd"));
+  if (!valid) {
+    return `安装完整性校验失败：期望版本 ${latest}，实际 ${installedVersion ?? "（无法读取）"}，或缺少 .bin\\dsh.cmd。`;
+  }
+  // 晋升：rmSync 旧目录 + renameSync 临时目录。正在运行的实例若从 target 加载了原生 DLL，
+  // Windows 会拒绝删除/改名已加载文件（EPERM）——先等 ~2s 重试一次，仍失败则提示用户退出。
   try {
     rmSync(target, { recursive: true, force: true });
     renameSync(tmp, target);
-    return true;
-  } catch {
-    return false;
+    return null;
+  } catch (e) {
+    await sleep(2000);
+    try {
+      rmSync(target, { recursive: true, force: true });
+      renameSync(tmp, target);
+      return null;
+    } catch (e2) {
+      const detail = e2 instanceof Error ? e2.message : String(e2);
+      return `安装完整性校验通过，但晋升失败：${detail}。旧实例可能仍占用文件，请先关闭 DSH 面板或完全退出 Obsidian 后重试。`;
+    }
   }
 }
 
@@ -900,11 +975,11 @@ type UpdateCheckResult =
   | { kind: "update-available"; latest: string; current: string | null };
 
 /**
- * 按通道只查询最新版（stable = npm latest 官方正式通道；alpha = npm alpha 预览通道）
- * 并与本地最高版本比较，绝不自动下载/安装。是否安装交由用户在设置页确认（决定权交给用户）。
+ * 只查询官方稳定版（npm latest，即官方 rc 回归线），并与本地最高版本比较，
+ * 绝不自动下载/安装。是否安装交由用户在设置页确认（决定权交给用户）。
  */
-async function checkForUpdate(channel: DshChannel): Promise<UpdateCheckResult> {
-  const latest = await fetchChannelVersion(channel);
+async function checkForUpdate(): Promise<UpdateCheckResult> {
+  const latest = await fetchChannelLatest();
   if (!latest) return { kind: "error" };
   const best = pickBestInstall(detectDshInstalls());
   if (best?.version && compareSemver(latest, best.version) <= 0) {
@@ -954,6 +1029,11 @@ class InstanceManager {
       const recordedUrl = record.url ?? `http://127.0.0.1:${record.port}/`;
       const probe = await probeUrl(recordedUrl);
       if (probe === "ok") {
+        const livePid = findPortPid(record.port);
+        if (livePid !== null && livePid !== record.pid) {
+          record.pid = livePid; // 旧版本可能记录 cmd 包装 pid，刷新为真实内核 pid
+          await this.save();
+        }
         onState?.(`运行中 @ ${record.port}`);
         return { port: record.port, url: recordedUrl };
       }
@@ -1007,7 +1087,7 @@ class InstanceManager {
       url = (await waitForDsh(port, 60_000, getLog)).url;
     } catch (e) {
       // 启动失败：杀掉残留子进程树，避免留下孤儿 dsh 占着端口（这也是反复超时的一大根因）
-      if (child?.pid) stopProcess(child.pid);
+      if (child?.pid) await stopProcess(child.pid);
       const log = getLog();
       const msg = e instanceof Error ? e.message : String(e);
       const hint = npxOnly
@@ -1019,18 +1099,42 @@ class InstanceManager {
     }
 
     const finalUrl = url ?? `http://127.0.0.1:${port}/`;
-    settings.instances[vaultPath] = { port, pid, url: finalUrl };
+    // 记录真实内核 pid：spawn 返回的是 cmd.exe 包装进程的 pid，真实内核 node 是它的孩子。
+    // 用 netstat 反查监听端口的真实 pid 覆盖写入，保证 stopAll/stopOnUnload 能回收真正的内核进程。
+    const realPid = findPortPid(port) ?? pid;
+    settings.instances[vaultPath] = { port, pid: realPid, url: finalUrl };
     await this.save();
     onState?.(`运行中 @ ${port}`);
     return { port, url: finalUrl };
   }
 
-  /** 停止所有已记录的实例。 */
-  stopAll(): void {
-    const records = Object.values(this.getSettings().instances);
-    for (const record of records) {
-      if (record.pid) stopProcess(record.pid);
+  /**
+   * 停止单个实例：先按记录的 pid 树杀；若该 pid 已失效但端口上仍有 DSH 响应
+   * （典型：记录的是已死的 cmd 包装 pid，真实内核成了孤儿），则按端口反查真实 pid 再树杀，
+   * 确保孤儿内核能被回收。
+   */
+  private async stopInstance(record: InstanceRecord): Promise<boolean> {
+    // 先按记录 pid 树杀；再用端口监听者判定残留，与 HTTP 探测解耦：
+    // 带鉴权内核（rc/alpha）对无 token 请求返回 401，依赖响应文本的探测会误判为已停止。
+    if (record.pid) await stopProcess(record.pid);
+    for (let i = 0; i < 8; i++) {
+      await sleep(400);
+      const livePid = findPortPid(record.port);
+      if (livePid === null) {
+        // netstat 不可用时的兜底：端口上已无 HTTP 服务即视为停止
+        if (!(await probeAnyHttp(record.port, 1200))) return true;
+      } else {
+        await stopProcess(livePid);
+      }
     }
+    return findPortPid(record.port) === null;
+  }
+
+  /** 停止全部已记录实例；返回是否全部确认停止（端口无监听、文件句柄可释放）。 */
+  async stopAll(): Promise<boolean> {
+    const records = Object.values(this.getSettings().instances);
+    const results = await Promise.all(records.map((r) => this.stopInstance(r)));
+    return results.every(Boolean);
   }
 }
 
@@ -1233,7 +1337,7 @@ export default class DshPlugin extends Plugin {
   }
 
   onunload(): void {
-    if (this.settings.stopOnUnload) this.manager.stopAll();
+    if (this.settings.stopOnUnload) void this.manager.stopAll();
   }
 }
 
@@ -1267,52 +1371,32 @@ class DshSettingTab extends PluginSettingTab {
       );
 
     const best = pickBestInstall(detectDshInstalls());
-    let channel: DshChannel = "stable";
-    const channelLabel = (c: DshChannel) => (c === "stable" ? "稳定版" : "alpha 体验版");
     const updateSetting = new Setting(containerEl)
       .setName("dsh 版本更新")
       .setDesc(
         best?.version
-          ? `当前使用本地 ${best.version}。选择通道后点「检查更新」才联网查询（稳定版 = npm 官方正式通道，alpha 体验版 = 官方预览通道），发现新版需确认后才安装。`
+          ? `当前使用本地 ${best.version}。仅安装官方稳定版（npm latest，即官方 rc 回归线），不提供体验版。点「检查更新」才联网查询，发现新版需确认后才安装。`
           : "未检测到本地 dsh，首次启动将 npx 在线安装。默认不自动升级，可手动检查更新。"
-      )
-      .addDropdown((dd) =>
-        dd
-          .addOption("stable", "稳定版")
-          .addOption("alpha", "alpha 体验版")
-          .setValue("stable")
-          .onChange((value) => {
-            channel = value as DshChannel;
-          })
       )
       .addButton((btn) =>
         btn.setButtonText("检查更新").onClick(async () => {
           btn.setDisabled(true);
-          updateSetting.setDesc(`正在检查${channelLabel(channel)}通道最新版本 ...`);
-          const result = await checkForUpdate(channel);
+          updateSetting.setDesc(`正在检查最新稳定版本 ...`);
+          const result = await checkForUpdate();
           if (result.kind === "error") {
-            updateSetting.setDesc(
-              channel === "alpha"
-                ? "检查失败：无法访问 registry，或 alpha 通道暂无可用版本，保持当前版本。"
-                : "检查失败：无法访问 registry（网络/代理问题），保持当前版本。"
-            );
+            updateSetting.setDesc("检查失败：无法访问 registry（网络/代理问题），保持当前版本。");
           } else if (result.kind === "up-to-date") {
             updateSetting.setDesc(
               result.version !== result.latest
-                ? `${channelLabel(channel)}通道最新 ${result.latest}，本地 ${result.version} 更高，无需更新。`
+                ? `最新稳定版 ${result.latest}，本地 ${result.version} 更高，无需更新。`
                 : `已是最新（${result.latest}）。`
             );
           } else {
             const { latest, current } = result;
             updateSetting.setDesc(
-              `${channelLabel(channel)}通道发现新版 ${latest}${current ? `（当前 ${current}）` : ""}，等待确认。`
+              `发现新版 ${latest}${current ? `（当前 ${current}）` : ""}，等待确认。`
             );
-            const notice = new Notice(
-              channel === "alpha"
-                ? `发现 alpha 体验版 ${latest}，是否安装？（升级会自动迁移会话数据，历史不丢）`
-                : `发现稳定版新版本 ${latest}，是否安装？`,
-              0
-            );
+            const notice = new Notice(`发现稳定版新版本 ${latest}，是否安装？`, 0);
             const frag = new DocumentFragment();
             const yes = frag.createEl("button", { text: "安装" });
             const no = frag.createEl("button", { text: "取消" });
@@ -1330,8 +1414,24 @@ class DshSettingTab extends PluginSettingTab {
                 );
               }, 5_000);
               let ok = false;
+              let errMsg = "";
               try {
-                ok = await installLatestToManaged(latest);
+                // 升级前先停全部插件实例：内核只有一份托管目录 dsh-latest，任何从它启动的
+                // 实例都会加载 sharp/koffi 等原生 DLL 锁住文件，Windows 无法删除/改名已加载
+                // DLL（EPERM）→ 升级必然失败。停全部实例是符合直觉的全局行为。
+                updateSetting.setDesc(`正在停止 DSH 实例以释放文件占用，然后安装 dsh ${latest} ...`);
+                const allStopped = await this.plugin.manager.stopAll();
+                if (!allStopped) {
+                  // 还有实例占用内核文件：中止升级，否则晋升阶段必撞 EPERM
+                  errMsg = "仍有 DSH 实例占用内核文件（进程未完全停止），请关闭 DSH 面板并完全退出 Obsidian 后重试。";
+                } else {
+                  // 等待文件句柄释放（进程退出 + 系统回收句柄需要一点时间）
+                  await sleep(2000);
+                  updateSetting.setDesc(`正在安装 dsh ${latest} ...`);
+                  const err = await installLatestToManaged(latest);
+                  ok = err === null;
+                  errMsg = err ?? "";
+                }
               } finally {
                 window.clearInterval(ticker);
                 installing.hide();
@@ -1340,8 +1440,12 @@ class DshSettingTab extends PluginSettingTab {
                 new Notice(`dsh ${latest} 安装完成，下次打开面板自动启用。`, 10_000);
                 updateSetting.setDesc(`dsh ${latest} 已就绪，下次打开面板自动启用。`);
               } else {
-                new Notice(`dsh ${latest} 安装失败，保持当前版本，请稍后重试。`, 10_000);
-                updateSetting.setDesc("安装失败，保持当前版本，请稍后重试。");
+                // 透出具体错误（参照启动失败路径的"错误尾"展示模式），并给出可操作建议
+                const tail = errMsg.slice(-3000);
+                new Notice(`dsh ${latest} 安装失败：${tail}`, 10_000);
+                updateSetting.setDesc(
+                  `安装失败：${tail}。请先关闭 DSH 面板或完全退出 Obsidian 后重试。`
+                );
               }
             };
             no.onclick = () => {
