@@ -3,6 +3,7 @@ import {
   App,
   FileSystemAdapter,
   ItemView,
+  MarkdownView,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -16,6 +17,62 @@ import { get } from "http";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { parseDocument, Document } from "yaml";
+
+/**
+ * 注入到 DSH webview 内的轻量桥接脚本：暴露 window.__dshBridgeFill(text)，
+ * 由宿主用 executeJavaScript 直调，把隐式定位行填入 DSH 聊天草稿。
+ * 兼容 React 受控 textarea（原生 setter + input 事件）与新版 contentEditable 输入框；
+ * 输入框未挂载时自适应重试（先密后疏，最长 ~10s）。重复注入自动跳过（幂等）。
+ * 保持与 dsh-harness bridge 同逻辑但更精简。
+ */
+const BRIDGE_SOURCE =
+  "(function(){if(window.__dshBridgeFill)return;" +
+  "var BRIDGE_LINE_RE=/\\[\\s*BRIDGES is delivering packages for you……\\s*·\\s*(\\d+)\\s*words\\s*·\\s*L(\\d+):(\\d+)-L(\\d+):(\\d+)\\s*·\\s*([^\\]]+?)\\s*·\\s*\\]/;" +
+  "function mergeFill(e,i){if(!e)e='';var a=e.split('\\n'),p=false,r='',x;for(x=0;x<a.length;x++){var l=a[x];if(BRIDGE_LINE_RE.test(l))continue;var empty=l.trim()==='';if(empty&&p)continue;r=r===''?l:r+'\\n'+l;p=empty}r=r.replace(/^\\s+|\\s+$/g,'');if(i==='')return r;return r===''?i:i+'\\n'+r}" +
+  "function pick(){var el=document.querySelector('textarea[data-phase]')||document.querySelector('textarea');if(el)return el.readOnly||el.disabled?null:el;var eds=document.querySelectorAll('[contenteditable=\"true\"]');for(var i=0;i<eds.length;i++){var ce=eds[i];if(ce.isContentEditable&&!ce.disabled&&ce.offsetParent!==null)return ce}return null}" +
+  "function isField(el){return el.tagName==='TEXTAREA'||el.tagName==='INPUT'}" +
+  "function fieldSet(el,val){var p=el.tagName==='INPUT'?window.HTMLInputElement.prototype:window.HTMLTextAreaElement.prototype;var d=Object.getOwnPropertyDescriptor(p,'value');d.set.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}))}" +
+  "function editSet(el,val){try{el.focus();var sel=window.getSelection();var rng=document.createRange();rng.selectNodeContents(el);sel.removeAllRanges();sel.addRange(rng);var ok=false;try{ok=document.execCommand('insertText',false,val)}catch(_){}if(!ok)throw new Error('insertText unavailable')}catch(_){el.textContent=val;el.dispatchEvent(new Event('input',{bubbles:true}))}}" +
+  "function fill(text){var n=0;function go(){var el=pick();if(el){var cur=isField(el)?el.value||'':el.textContent||'';var merged=mergeFill(cur,text);if(isField(el)){fieldSet(el,merged)}else{editSet(el,merged)}return}if(n<30){n++;setTimeout(go,n<10?150:500)}}go()}" +
+  "var kbdList=[];" +
+  "function kbdCombo(e){var k=e.key||'';if(k==='Control'||k==='Alt'||k==='Shift'||k==='Meta')return '';var p=[];if(e.ctrlKey)p.push('ctrl');if(e.altKey)p.push('alt');if(e.shiftKey)p.push('shift');if(e.metaKey)p.push('meta');if(!p.length)return '';p.push(k.toLowerCase());return p.join('+')}" +
+  "window.__dshKbdCfg=function(keys){kbdList=Array.isArray(keys)?keys.slice():[];void 0};" +
+  "document.addEventListener('keydown',function(e){var c=kbdCombo(e);if(c&&kbdList.indexOf(c)>=0){e.preventDefault();e.stopPropagation();try{console.log('__DSHKBD__'+c)}catch(_){}}},true);" +
+  "window.__dshBridgeFill=fill;" +
+  "})();";
+
+/** Obsidian Hotkey（modifiers+key）→ 归一化组合键串（'ctrl+p' / 'ctrl+shift+o' / 'meta+k'）。 */
+interface HotkeyLike {
+  modifiers?: string[];
+  key?: string;
+}
+
+function hotkeyToCombo(hk: HotkeyLike | undefined): string | null {
+  if (!hk || typeof hk.key !== "string" || hk.key === "") return null;
+  let ctrl = false;
+  let alt = false;
+  let shift = false;
+  let meta = false;
+  for (const raw of hk.modifiers ?? []) {
+    const m = String(raw).toLowerCase();
+    if (m === "mod") {
+      if (process.platform === "darwin") meta = true;
+      else ctrl = true;
+    } else if (m === "ctrl" || m === "control") ctrl = true;
+    else if (m === "alt") alt = true;
+    else if (m === "shift") shift = true;
+    else if (m === "meta" || m === "cmd" || m === "command") meta = true;
+  }
+  // 无修饰符单键不透传，避免干扰 DSH 正常输入
+  if (!ctrl && !alt && !meta) return null;
+  const parts: string[] = [];
+  if (ctrl) parts.push("ctrl");
+  if (alt) parts.push("alt");
+  if (shift) parts.push("shift");
+  if (meta) parts.push("meta");
+  parts.push(hk.key.toLowerCase());
+  return parts.join("+");
+}
 
 /**
  * DSH 实例管理 + 设置模型。
@@ -55,6 +112,10 @@ interface DshSettings {
   lastUpdateCheck: number;
   /** 数据备份目录；留空 = 默认 %LOCALAPPDATA%\dsh-obsidian\<库Hash>\backups */
   backupDir: string;
+  /** 焦点在 DSH 面板时透传 Obsidian 快捷键（Ctrl+P/Ctrl+O 等） */
+  shortcutPassthrough: boolean;
+  /** 面板底部留白（px，0-30）：状态栏遮挡底部内容时垫高 */
+  bottomPadding: number;
 }
 
 const DEFAULT_SETTINGS: DshSettings = {
@@ -66,7 +127,38 @@ const DEFAULT_SETTINGS: DshSettings = {
   instances: {},
   lastUpdateCheck: 0,
   backupDir: "",
+  shortcutPassthrough: true,
+  bottomPadding: 28,
 };
+
+/** 启动诊断：单个阶段耗时（毫秒）。 */
+interface BootStage {
+  label: string;
+  ms: number;
+}
+
+/** 启动诊断：最近一次 ensureRunning + 面板加载的完整轨迹。 */
+interface BootTrace {
+  /** Date.now() 起点 */
+  startedAt: number;
+  /** true = 复用已运行实例；false = 冷启动内核 */
+  reused: boolean;
+  stages: BootStage[];
+}
+
+function bootTotal(tb: BootTrace): number {
+  return tb.stages.reduce((s, x) => s + x.ms, 0);
+}
+
+/** 启动诊断纯文本（供复制粘贴反馈问题用）。 */
+function formatBootTrace(tb: BootTrace): string[] {
+  const head = [
+    `时间: ${new Date(tb.startedAt).toLocaleString()}`,
+    `模式: ${tb.reused ? "复用已运行实例" : "冷启动"}`,
+    `总耗时: ${bootTotal(tb).toLocaleString()} ms`,
+  ];
+  return [...head, ...tb.stages.map((s) => `  · ${s.label}: ${s.ms.toLocaleString()} ms`)];
+}
 
 /** 启动错误：nodeMissing 时面板额外展示 Node.js 下载入口。 */
 class BootError extends Error {
@@ -996,6 +1088,9 @@ async function checkForUpdate(): Promise<UpdateCheckResult> {
  * 之后若要做共享单实例模式，新增一个策略类即可（UI/视图无需改动）。
  */
 class InstanceManager {
+  /** 最近一次启动诊断轨迹（含面板加载段），仅存内存，设置页展示。 */
+  lastBoot: BootTrace | null = null;
+
   constructor(
     private getSettings: () => DshSettings,
     private save: () => Promise<void>
@@ -1014,12 +1109,23 @@ class InstanceManager {
     vaultPath: string,
     onState?: (state: string) => void
   ): Promise<{ port: number; url: string }> {
+    // 启动诊断打点：每阶段耗时写入 this.lastBoot，设置页展示
+    const tStart = Date.now();
+    let tLast = tStart;
+    const stages: BootStage[] = [];
+    const mark = (label: string): void => {
+      const now = Date.now();
+      stages.push({ label, ms: now - tLast });
+      tLast = now;
+    };
+
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
 
     // 0. 每次打开面板都同步主实例的模型供应商/凭据（无论实例是否已在运行）。
     //    运行中的 DSH 会在 settings.yaml 写回后热重载，下次请求即可用上新配置。
     syncModelConfig(vaultHome(vaultPath));
+    mark("配置同步");
 
     // 1. 复用：记录过的 URL 仍然有效才复用。
     //    只探测端口会被"半死服务 / 换过内核"误导——典型事故：记录是 rc 时代无 token 的 URL，
@@ -1034,6 +1140,8 @@ class InstanceManager {
           record.pid = livePid; // 旧版本可能记录 cmd 包装 pid，刷新为真实内核 pid
           await this.save();
         }
+        mark("复用探测");
+        this.lastBoot = { startedAt: tStart, reused: true, stages };
         onState?.(`运行中 @ ${record.port}`);
         return { port: record.port, url: recordedUrl };
       }
@@ -1041,12 +1149,14 @@ class InstanceManager {
         // 端口上还有服务但 URL 无效：清掉旧实例，避免它继续占着端口
         killPortOwner(record.port);
       }
+      mark("复用探测（未命中，清理重建）");
     }
 
     // 2. 前置检查：Node.js（npx 依赖）
     if (!(await probeNode())) {
       throw new BootError("未检测到 Node.js（DSH 依赖它运行）", true);
     }
+    mark("Node 检测");
 
     // 3. 分配空闲端口：从确定性候选开始往上找
     let port = this.vaultPort(vaultPath);
@@ -1054,6 +1164,7 @@ class InstanceManager {
       if (!(await probeAnyHttp(port))) break;
       port++;
     }
+    mark("端口分配");
 
     // 4. 准备库专属数据目录（种入库根工作区），启动 + 等待就绪
     const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port);
@@ -1063,6 +1174,7 @@ class InstanceManager {
       migrateSessionProjectionCache(dshHome, backupDir);
     }
     seedWorkspace(dshHome, vaultPath);
+    mark("数据目录准备");
     onState?.(
       npxOnly
         ? `正在下载安装 dsh 内核（首次在线安装，约需 1-5 分钟）...`
@@ -1070,6 +1182,7 @@ class InstanceManager {
     );
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
+    mark("进程拉起");
     const getLog = () =>
       (child as unknown as { __getLog?: () => string } | undefined)?.__getLog?.() ?? "";
     // npx 冷安装期间周期刷新等待时长，面板不会像卡死一样毫无反馈
@@ -1104,6 +1217,8 @@ class InstanceManager {
     const realPid = findPortPid(port) ?? pid;
     settings.instances[vaultPath] = { port, pid: realPid, url: finalUrl };
     await this.save();
+    mark(npxOnly ? "等待就绪+落盘（含首次下载）" : "等待就绪+落盘");
+    this.lastBoot = { startedAt: tStart, reused: false, stages };
     onState?.(`运行中 @ ${port}`);
     return { port, url: finalUrl };
   }
@@ -1142,11 +1257,18 @@ class InstanceManager {
 
 const VIEW_TYPE = "dsh-view";
 
+/** Electron <webview> 的最小类型面（Obsidian 编译环境无 Electron 类型声明，本地兜底定义）。 */
+interface WebviewLike {
+  executeJavaScript: (code: string) => Promise<unknown>;
+  addEventListener: (type: string, listener: (event: unknown) => void) => void;
+  setAttribute: (name: string, value: string) => void;
+}
+
 /** DeepSeek 官方鲸鱼 logo（取自 DSH webui 的 favicon.svg，50x50 坐标系的 path 数据）。 */
 const FISH_LOGO_PATH_D =
   "M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z";
 
-/** DSH 面板视图：一个 iframe 嵌 DSH Web UI。 */
+/** DSH 面板视图：嵌入 DSH Web UI（统一使用 Electron <webview>）。 */
 class DshView extends ItemView {
   constructor(leaf: WorkspaceLeaf, private plugin: DshPlugin) {
     super(leaf);
@@ -1164,7 +1286,57 @@ class DshView extends ItemView {
     return "dsh-logo";
   }
 
+  private wvEl: HTMLElement | null = null;
+  private hostPath = "";
+  /** 向 webview 注入/复用桥接并填充 DSH 草稿（executeJavaScript 直调，不依赖 postMessage）。 */
+  fillDraft(text: string, attempts = 0): Promise<void> {
+    const wv = this.wvEl as unknown as WebviewLike | null;
+    if (!wv) {
+      new Notice("DSH 面板尚未就绪");
+      return Promise.resolve();
+    }
+    const call = "window.__dshBridgeFill(" + JSON.stringify(text) + ")";
+    const code =
+      "if(!window.__dshBridgeFill){try{" + BRIDGE_SOURCE + "}catch(_){}}" + call + ";void 0";
+    return wv.executeJavaScript(code).then(
+      () => {
+        new Notice("已发送选中区域给 DSH");
+      },
+      () => {
+        // 页面尚未加载完（刚自动打开面板）时 executeJavaScript 会 reject，1 秒一次最多重试 10 次
+        if (attempts < 10) {
+          return new Promise<void>((resolve) =>
+            window.setTimeout(() => resolve(this.fillDraft(text, attempts + 1)), 1000)
+          );
+        }
+        new Notice("DSH 输入框未就绪，请稍后重试");
+      }
+    );
+  }
+
+  /** 把当前 Obsidian 快捷键组合集合下发给 webview 桥接（开关键变化时也会重推）。 */
+  pushKbdConfig(): void {
+    const wv = this.wvEl as unknown as WebviewLike | null;
+    if (!wv) return;
+    const keys = this.plugin.buildPassthroughCombos();
+    const code =
+      "if(window.__dshKbdCfg){window.__dshKbdCfg(" + JSON.stringify(keys) + ");}void 0";
+    void wv.executeJavaScript(code).catch(() => {
+      /* webview 尚未加载完：did-finish-load 注入成功后会再推 */
+    });
+  }
+
+  /** 即时应用底部留白（px）。 */
+  applyBottomPadding(px: number): void {
+    this.contentEl.style.setProperty("--dsh-pad-bottom", `${px}px`);
+  }
   async onOpen(): Promise<void> {
+    // 面板每次被激活时重推快捷键配置：用户在 Obsidian 里改快捷键后无需重开面板
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf && leaf.view === this) this.pushKbdConfig();
+      })
+    );
     this.contentEl.empty();
     this.contentEl.addClass("dsh-view");
     await this.loadPanel();
@@ -1215,6 +1387,8 @@ class DshView extends ItemView {
     };
 
     status.setText("已连接，正在加载界面 ...");
+    const navStart = Date.now();
+    let bootRecorded = false;
     let settled = false;
     const timeoutTimer = window.setTimeout(() => {
       if (!settled) {
@@ -1223,19 +1397,51 @@ class DshView extends ItemView {
       }
     }, 60_000);
 
-    // 0.1.2+ 浏览器鉴权版：SameSite=Strict cookie 在跨站 iframe 里不发送（实测 401）。
-    // 改用 Electron <webview>：独立渲染进程，guest 内的顶层导航下 cookie 正常发送。
-    if (/\?token=/.test(url)) {
+    // 统一使用 Electron <webview>：独立渲染进程，SameSite=Strict cookie 正常发送；
+    // 兼容有/无 token 的所有内核，代码更干净（不再按 token 分流 iframe/webview）。
+    {
       const wv = this.contentEl.createEl(
         "webview" as unknown as keyof HTMLElementTagNameMap,
         { cls: "dsh-frame" }
       ) as unknown as HTMLElement;
+      this.wvEl = wv;
+      this.hostPath = vaultPath;
       wv.setAttribute("src", url);
       wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
+      // 底部留白：CSS 变量写在容器上（.dsh-frame 高度与 .dsh-view::after 留白条共同消费，滑杆实时生效）
+      this.contentEl.style.setProperty("--dsh-pad-bottom", `${this.plugin.settings.bottomPadding}px`);
+      // guest→host 带外通道：桥接命中透传快捷键时 console.log('__DSHKBD__'+combo)，此处捕获执行
+      wv.addEventListener("console-message", (e) => {
+        const ev = e as unknown as { message?: string; detail?: { message?: string } };
+        const msg =
+          typeof ev.message === "string"
+            ? ev.message
+            : typeof ev.detail?.message === "string"
+              ? ev.detail.message
+              : "";
+        if (msg.startsWith("__DSHKBD__")) {
+          this.plugin.runHotkeyCombo(msg.slice("__DSHKBD__".length));
+        }
+      });
       wv.addEventListener("did-finish-load", () => {
         settled = true;
         window.clearTimeout(timeoutTimer);
         status.remove();
+        // 启动诊断收尾：面板加载段写入轨迹（多次导航只记首次）
+        if (!bootRecorded) {
+          bootRecorded = true;
+          const lb = this.plugin.manager.lastBoot;
+          if (lb) lb.stages.push({ label: "面板加载", ms: Date.now() - navStart });
+        }
+        // 页面加载完成即注入桥接（暴露 window.__dshBridgeFill，供 fillDraft 直调）；
+        // SPA 内后续导航不重跑本脚本，桥接随页面存活。注入成功后下发快捷键配置。
+        const wvt = wv as unknown as WebviewLike;
+        void wvt
+          .executeJavaScript(BRIDGE_SOURCE)
+          .then(() => this.pushKbdConfig())
+          .catch(() => {
+            /* 注入失败（界面尚未就绪）不阻断面板 */
+          });
       });
       wv.addEventListener("did-fail-load", (e) => {
         settled = true;
@@ -1245,14 +1451,6 @@ class DshView extends ItemView {
         if (code === -3) return;
         showError("DSH 界面加载失败（webview 错误）。请点击下方按钮重启服务。");
         this.plugin.updateStatusBar("加载失败");
-      });
-    } else {
-      const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
-      frame.setAttr("src", url);
-      frame.addEventListener("load", () => {
-        settled = true;
-        window.clearTimeout(timeoutTimer);
-        status.remove();
       });
     }
   }
@@ -1291,6 +1489,31 @@ export default class DshPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "send-selection-to-dsh",
+      name: "将选中内容发送到 DSH",
+      callback: () => {
+        void this.sendSelectionToDsh();
+      },
+    });
+
+    // 编辑器右键菜单：选中内容时出现「发送到 DSH」
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor) => {
+        // Obsidian 官方 Editor API：getSelection() 无选区时返回空串
+        if (editor.getSelection()) {
+          menu.addItem((item) => {
+            item
+              .setTitle("发送选中内容到 DSH")
+              .setIcon("message-square")
+              .onClick(() => {
+                void this.sendSelectionToDsh();
+              });
+          });
+        }
+      })
+    );
+
     this.addSettingTab(new DshSettingTab(this.app, this));
 
     this.statusBar = this.addStatusBarItem();
@@ -1323,8 +1546,131 @@ export default class DshPlugin extends Plugin {
     workspace.setActiveLeaf(leaf);
   }
 
+  /** 找当前 DSH 视图实例（若存在）。 */
+  private dshView(): DshView | null {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    if (!leaf) return null;
+    const view = leaf.view;
+    return view instanceof DshView ? view : null;
+  }
+
+  /**
+   * 将当前笔记的选中区域发送到 DSH 草稿：
+   * 构造 DSH 隐式定位行（N words · Lx:y-Lx:y · <库内相对路径>），
+   * DSH 侧按该行读取文件选区（不携带原文，保持剪贴板语义、不贴大段文字）。
+   */
+  sendSelectionToDsh(): Promise<void> {
+    return (async () => {
+      const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!mdView) {
+        new Notice("请在笔记编辑器中选中内容后再发送");
+        return;
+      }
+      // Obsidian 官方 Editor API（不依赖 CM6 内部结构，兼容 1.4.0+）
+      const editor = mdView.editor;
+      const text = editor.getSelection();
+      if (!text) {
+        new Notice("未选中内容");
+        return;
+      }
+      const from = editor.getCursor("from");
+      const to = editor.getCursor("to");
+      const relPath = mdView.file ? mdView.file.path : "";
+      const implicit =
+        `[ BRIDGES is delivering packages for you…… · ${text.length} words · ` +
+        `L${from.line + 1}:${from.ch + 1}-L${to.line + 1}:${to.ch + 1} · ${relPath} · ]`;
+
+      let view = this.dshView();
+      if (!view) {
+        await this.openView();
+        view = this.dshView();
+      }
+      if (!view) {
+        new Notice("DSH 面板未能打开");
+        return;
+      }
+      await view.fillDraft(implicit);
+    })();
+  }
+
   updateStatusBar(text: string): void {
     if (this.statusBar) this.statusBar.setText(`DSH: ${text}`);
+  }
+
+  // #region 快捷键透传（Obsidian 快捷键 → webview guest 拦截 → console-message 回传 → 执行命令）
+
+  /** 合并 Obsidian 默认快捷键与用户自定义快捷键，生成 combo→commandId 列表（自定义在后）。 */
+  private hotkeyEntries(): Array<{ combo: string; commandId: string }> {
+    const out: Array<{ combo: string; commandId: string }> = [];
+    const app = this.app as unknown as {
+      commands?: { listCommands?: () => Array<{ id?: string; hotkeys?: HotkeyLike[] }> };
+      hotkeyManager?: {
+        defaultHotkeys?: Record<string, { hotkeys?: HotkeyLike[] }>;
+      };
+    };
+    try {
+      const defaults = app.hotkeyManager?.defaultHotkeys;
+      if (defaults) {
+        for (const [commandId, entry] of Object.entries(defaults)) {
+          for (const hk of entry?.hotkeys ?? []) {
+            const combo = hotkeyToCombo(hk);
+            if (combo) out.push({ combo, commandId });
+          }
+        }
+      }
+    } catch {
+      /* 私有 API 面变动：忽略 */
+    }
+    try {
+      for (const cmd of app.commands?.listCommands?.() ?? []) {
+        if (!cmd || typeof cmd.id !== "string" || cmd.id === "" || !Array.isArray(cmd.hotkeys)) continue;
+        for (const hk of cmd.hotkeys) {
+          const combo = hotkeyToCombo(hk);
+          if (combo) out.push({ combo, commandId: cmd.id });
+        }
+      }
+    } catch {
+      /* 忽略 */
+    }
+    return out;
+  }
+
+  /** 当前应透传给 webview 的组合键集合（开关关闭 = 空集）。 */
+  buildPassthroughCombos(): string[] {
+    if (!this.settings.shortcutPassthrough) return [];
+    return [...new Set(this.hotkeyEntries().map((e) => e.combo))];
+  }
+
+  /** 执行 guest 回传的组合键对应的 Obsidian 命令（自定义优先于默认）。 */
+  runHotkeyCombo(combo: string): void {
+    const wanted = combo.toLowerCase();
+    const entries = this.hotkeyEntries();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i].combo === wanted) {
+        try {
+          (
+            this.app as unknown as {
+              commands?: { executeCommandById?: (id: string) => unknown };
+            }
+          ).commands?.executeCommandById?.(entries[i].commandId);
+        } catch {
+          /* 命令执行失败静默 */
+        }
+        return;
+      }
+    }
+  }
+
+  // #endregion
+
+  /** 快捷键透传开关变化后，向已打开的面板重推配置。 */
+  refreshKbdConfig(): void {
+    this.dshView()?.pushKbdConfig();
+  }
+
+  /** 底部留白滑杆变化后，即时应用到已打开的面板。 */
+  refreshBottomPadding(): void {
+    this.dshView()?.applyBottomPadding(this.settings.bottomPadding);
   }
 
   async loadSettings(): Promise<void> {
@@ -1534,6 +1880,17 @@ class DshSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("快捷键透传")
+      .setDesc("开启后，焦点在 DSH 面板内时，你在 Obsidian 设置里配置过的全局快捷键（如 Ctrl+P、Ctrl+O、Ctrl+,）仍会触发 Obsidian 对应命令，不会被网页吞掉。")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.shortcutPassthrough).onChange(async (value) => {
+          this.plugin.settings.shortcutPassthrough = value;
+          await this.plugin.saveSettings();
+          this.plugin.refreshKbdConfig();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("面板位置")
       .setDesc("DSH 面板显示的位置。")
       .addDropdown((dropdown) =>
@@ -1547,6 +1904,50 @@ class DshSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl)
+      .setName("面板底部留白")
+      .setDesc("若 DSH 面板底部被 Obsidian 状态栏遮挡，调大此值垫高底部（0–40px，默认 28）。留白区带上分割线，背景透明跟随主题。")
+      .addSlider((slider) =>
+        slider
+          .setLimits(0, 40, 1)
+          .setValue(this.plugin.settings.bottomPadding)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            const pad = Math.max(0, Math.min(40, Math.round(value)));
+            this.plugin.settings.bottomPadding = pad;
+            await this.plugin.saveSettings();
+            this.plugin.refreshBottomPadding();
+          })
+      );
+
+    // 启动耗时诊断：最近一次启动的内存内轨迹（定位启动慢在哪一段），可复制反馈
+    {
+      const boot = this.plugin.manager.lastBoot;
+      const bootSetting = new Setting(containerEl)
+        .setName("启动耗时诊断")
+        .setDesc(
+          boot
+            ? `最近一次：${new Date(boot.startedAt).toLocaleString()} · ${boot.reused ? "复用实例" : "冷启动"} · 总耗时 ${bootTotal(boot).toLocaleString()} ms`
+            : "本次会话还没有启动记录。打开一次 DSH 面板后回到这里查看。"
+        );
+      if (boot) {
+        containerEl
+          .createDiv({ cls: "dsh-boot-trace" })
+          .createEl("pre", { text: formatBootTrace(boot).join("\n") });
+      }
+      bootSetting.addButton((b) =>
+        b.setButtonText("复制详情").onClick(() => {
+          const t = this.plugin.manager.lastBoot;
+          if (!t) {
+            new Notice("暂无启动记录");
+            return;
+          }
+          void navigator.clipboard.writeText(formatBootTrace(t).join("\n"));
+          new Notice("启动耗时详情已复制");
+        })
+      );
+    }
   }
 
   /** Obsidian 1.13+ settings search integration (optional but recommended). */

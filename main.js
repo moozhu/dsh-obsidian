@@ -7370,6 +7370,32 @@ var import_http = require("http");
 var import_os = require("os");
 var import_path = require("path");
 var import_yaml = __toESM(require_dist());
+var BRIDGE_SOURCE = `(function(){if(window.__dshBridgeFill)return;var BRIDGE_LINE_RE=/\\[\\s*BRIDGES is delivering packages for you\u2026\u2026\\s*\xB7\\s*(\\d+)\\s*words\\s*\xB7\\s*L(\\d+):(\\d+)-L(\\d+):(\\d+)\\s*\xB7\\s*([^\\]]+?)\\s*\xB7\\s*\\]/;function mergeFill(e,i){if(!e)e='';var a=e.split('\\n'),p=false,r='',x;for(x=0;x<a.length;x++){var l=a[x];if(BRIDGE_LINE_RE.test(l))continue;var empty=l.trim()==='';if(empty&&p)continue;r=r===''?l:r+'\\n'+l;p=empty}r=r.replace(/^\\s+|\\s+$/g,'');if(i==='')return r;return r===''?i:i+'\\n'+r}function pick(){var el=document.querySelector('textarea[data-phase]')||document.querySelector('textarea');if(el)return el.readOnly||el.disabled?null:el;var eds=document.querySelectorAll('[contenteditable="true"]');for(var i=0;i<eds.length;i++){var ce=eds[i];if(ce.isContentEditable&&!ce.disabled&&ce.offsetParent!==null)return ce}return null}function isField(el){return el.tagName==='TEXTAREA'||el.tagName==='INPUT'}function fieldSet(el,val){var p=el.tagName==='INPUT'?window.HTMLInputElement.prototype:window.HTMLTextAreaElement.prototype;var d=Object.getOwnPropertyDescriptor(p,'value');d.set.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}))}function editSet(el,val){try{el.focus();var sel=window.getSelection();var rng=document.createRange();rng.selectNodeContents(el);sel.removeAllRanges();sel.addRange(rng);var ok=false;try{ok=document.execCommand('insertText',false,val)}catch(_){}if(!ok)throw new Error('insertText unavailable')}catch(_){el.textContent=val;el.dispatchEvent(new Event('input',{bubbles:true}))}}function fill(text){var n=0;function go(){var el=pick();if(el){var cur=isField(el)?el.value||'':el.textContent||'';var merged=mergeFill(cur,text);if(isField(el)){fieldSet(el,merged)}else{editSet(el,merged)}return}if(n<30){n++;setTimeout(go,n<10?150:500)}}go()}var kbdList=[];function kbdCombo(e){var k=e.key||'';if(k==='Control'||k==='Alt'||k==='Shift'||k==='Meta')return '';var p=[];if(e.ctrlKey)p.push('ctrl');if(e.altKey)p.push('alt');if(e.shiftKey)p.push('shift');if(e.metaKey)p.push('meta');if(!p.length)return '';p.push(k.toLowerCase());return p.join('+')}window.__dshKbdCfg=function(keys){kbdList=Array.isArray(keys)?keys.slice():[];void 0};document.addEventListener('keydown',function(e){var c=kbdCombo(e);if(c&&kbdList.indexOf(c)>=0){e.preventDefault();e.stopPropagation();try{console.log('__DSHKBD__'+c)}catch(_){}}},true);window.__dshBridgeFill=fill;})();`;
+function hotkeyToCombo(hk) {
+  if (!hk || typeof hk.key !== "string" || hk.key === "") return null;
+  let ctrl = false;
+  let alt = false;
+  let shift = false;
+  let meta = false;
+  for (const raw of hk.modifiers ?? []) {
+    const m = String(raw).toLowerCase();
+    if (m === "mod") {
+      if (process.platform === "darwin") meta = true;
+      else ctrl = true;
+    } else if (m === "ctrl" || m === "control") ctrl = true;
+    else if (m === "alt") alt = true;
+    else if (m === "shift") shift = true;
+    else if (m === "meta" || m === "cmd" || m === "command") meta = true;
+  }
+  if (!ctrl && !alt && !meta) return null;
+  const parts = [];
+  if (ctrl) parts.push("ctrl");
+  if (alt) parts.push("alt");
+  if (shift) parts.push("shift");
+  if (meta) parts.push("meta");
+  parts.push(hk.key.toLowerCase());
+  return parts.join("+");
+}
 var DEFAULT_SETTINGS = {
   dshCommand: "",
   basePort: 3090,
@@ -7378,8 +7404,21 @@ var DEFAULT_SETTINGS = {
   viewLocation: "right-sidebar",
   instances: {},
   lastUpdateCheck: 0,
-  backupDir: ""
+  backupDir: "",
+  shortcutPassthrough: true,
+  bottomPadding: 28
 };
+function bootTotal(tb) {
+  return tb.stages.reduce((s, x) => s + x.ms, 0);
+}
+function formatBootTrace(tb) {
+  const head = [
+    `\u65F6\u95F4: ${new Date(tb.startedAt).toLocaleString()}`,
+    `\u6A21\u5F0F: ${tb.reused ? "\u590D\u7528\u5DF2\u8FD0\u884C\u5B9E\u4F8B" : "\u51B7\u542F\u52A8"}`,
+    `\u603B\u8017\u65F6: ${bootTotal(tb).toLocaleString()} ms`
+  ];
+  return [...head, ...tb.stages.map((s) => `  \xB7 ${s.label}: ${s.ms.toLocaleString()} ms`)];
+}
 var BootError = class extends Error {
   constructor(message, nodeMissing = false) {
     super(message);
@@ -8025,6 +8064,8 @@ var InstanceManager = class {
     this.getSettings = getSettings;
     this.save = save;
   }
+  /** 最近一次启动诊断轨迹（含面板加载段），仅存内存，设置页展示。 */
+  lastBoot = null;
   /** 库路径的确定性候选端口。 */
   vaultPort(vaultPath) {
     return this.getSettings().basePort + hashPath(vaultPath) % 200;
@@ -8034,9 +8075,18 @@ var InstanceManager = class {
    * 已运行（端口上可识别出 DSH）则直接复用，不重复启动。
    */
   async ensureRunning(vaultPath, onState) {
+    const tStart = Date.now();
+    let tLast = tStart;
+    const stages = [];
+    const mark = (label) => {
+      const now = Date.now();
+      stages.push({ label, ms: now - tLast });
+      tLast = now;
+    };
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
     syncModelConfig(vaultHome(vaultPath));
+    mark("\u914D\u7F6E\u540C\u6B65");
     if (record) {
       const recordedUrl = record.url ?? `http://127.0.0.1:${record.port}/`;
       const probe = await probeUrl(recordedUrl);
@@ -8046,21 +8096,26 @@ var InstanceManager = class {
           record.pid = livePid;
           await this.save();
         }
+        mark("\u590D\u7528\u63A2\u6D4B");
+        this.lastBoot = { startedAt: tStart, reused: true, stages };
         onState?.(`\u8FD0\u884C\u4E2D @ ${record.port}`);
         return { port: record.port, url: recordedUrl };
       }
       if (await probeAnyHttp(record.port)) {
         killPortOwner(record.port);
       }
+      mark("\u590D\u7528\u63A2\u6D4B\uFF08\u672A\u547D\u4E2D\uFF0C\u6E05\u7406\u91CD\u5EFA\uFF09");
     }
     if (!await probeNode()) {
       throw new BootError("\u672A\u68C0\u6D4B\u5230 Node.js\uFF08DSH \u4F9D\u8D56\u5B83\u8FD0\u884C\uFF09", true);
     }
+    mark("Node \u68C0\u6D4B");
     let port = this.vaultPort(vaultPath);
     for (let i = 0; i < 100; i++) {
       if (!await probeAnyHttp(port)) break;
       port++;
     }
+    mark("\u7AEF\u53E3\u5206\u914D");
     const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port);
     const dshHome = vaultHome(vaultPath);
     if (needsAuthVersion(version)) {
@@ -8068,11 +8123,13 @@ var InstanceManager = class {
       migrateSessionProjectionCache(dshHome, backupDir);
     }
     seedWorkspace(dshHome, vaultPath);
+    mark("\u6570\u636E\u76EE\u5F55\u51C6\u5907");
     onState?.(
       npxOnly ? `\u6B63\u5728\u4E0B\u8F7D\u5B89\u88C5 dsh \u5185\u6838\uFF08\u9996\u6B21\u5728\u7EBF\u5B89\u88C5\uFF0C\u7EA6\u9700 1-5 \u5206\u949F\uFF09...` : `\u6B63\u5728\u542F\u52A8 @ ${port} ...`
     );
     const child = spawnDsh(bootCommand, vaultPath);
     const pid = child?.pid;
+    mark("\u8FDB\u7A0B\u62C9\u8D77");
     const getLog = () => child?.__getLog?.() ?? "";
     const startAt = Date.now();
     let ticker;
@@ -8102,6 +8159,8 @@ ${log.slice(-3e3) || "\uFF08\u65E0\u8F93\u51FA\uFF09"}
     const realPid = findPortPid(port) ?? pid;
     settings.instances[vaultPath] = { port, pid: realPid, url: finalUrl };
     await this.save();
+    mark(npxOnly ? "\u7B49\u5F85\u5C31\u7EEA+\u843D\u76D8\uFF08\u542B\u9996\u6B21\u4E0B\u8F7D\uFF09" : "\u7B49\u5F85\u5C31\u7EEA+\u843D\u76D8");
+    this.lastBoot = { startedAt: tStart, reused: false, stages };
     onState?.(`\u8FD0\u884C\u4E2D @ ${port}`);
     return { port, url: finalUrl };
   }
@@ -8146,7 +8205,50 @@ var DshView = class extends import_obsidian.ItemView {
   getIcon() {
     return "dsh-logo";
   }
+  wvEl = null;
+  hostPath = "";
+  /** 向 webview 注入/复用桥接并填充 DSH 草稿（executeJavaScript 直调，不依赖 postMessage）。 */
+  fillDraft(text, attempts = 0) {
+    const wv = this.wvEl;
+    if (!wv) {
+      new import_obsidian.Notice("DSH \u9762\u677F\u5C1A\u672A\u5C31\u7EEA");
+      return Promise.resolve();
+    }
+    const call = "window.__dshBridgeFill(" + JSON.stringify(text) + ")";
+    const code = "if(!window.__dshBridgeFill){try{" + BRIDGE_SOURCE + "}catch(_){}}" + call + ";void 0";
+    return wv.executeJavaScript(code).then(
+      () => {
+        new import_obsidian.Notice("\u5DF2\u53D1\u9001\u9009\u4E2D\u533A\u57DF\u7ED9 DSH");
+      },
+      () => {
+        if (attempts < 10) {
+          return new Promise(
+            (resolve) => window.setTimeout(() => resolve(this.fillDraft(text, attempts + 1)), 1e3)
+          );
+        }
+        new import_obsidian.Notice("DSH \u8F93\u5165\u6846\u672A\u5C31\u7EEA\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+      }
+    );
+  }
+  /** 把当前 Obsidian 快捷键组合集合下发给 webview 桥接（开关键变化时也会重推）。 */
+  pushKbdConfig() {
+    const wv = this.wvEl;
+    if (!wv) return;
+    const keys = this.plugin.buildPassthroughCombos();
+    const code = "if(window.__dshKbdCfg){window.__dshKbdCfg(" + JSON.stringify(keys) + ");}void 0";
+    void wv.executeJavaScript(code).catch(() => {
+    });
+  }
+  /** 即时应用底部留白（px）。 */
+  applyBottomPadding(px) {
+    this.contentEl.style.setProperty("--dsh-pad-bottom", `${px}px`);
+  }
   async onOpen() {
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf && leaf.view === this) this.pushKbdConfig();
+      })
+    );
     this.contentEl.empty();
     this.contentEl.addClass("dsh-view");
     await this.loadPanel();
@@ -8192,6 +8294,8 @@ var DshView = class extends import_obsidian.ItemView {
       btn.onclick = () => void this.loadPanel();
     };
     status.setText("\u5DF2\u8FDE\u63A5\uFF0C\u6B63\u5728\u52A0\u8F7D\u754C\u9762 ...");
+    const navStart = Date.now();
+    let bootRecorded = false;
     let settled = false;
     const timeoutTimer = window.setTimeout(() => {
       if (!settled) {
@@ -8199,17 +8303,35 @@ var DshView = class extends import_obsidian.ItemView {
         this.plugin.updateStatusBar("\u52A0\u8F7D\u8D85\u65F6");
       }
     }, 6e4);
-    if (/\?token=/.test(url)) {
+    {
       const wv = this.contentEl.createEl(
         "webview",
         { cls: "dsh-frame" }
       );
+      this.wvEl = wv;
+      this.hostPath = vaultPath;
       wv.setAttribute("src", url);
       wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
+      this.contentEl.style.setProperty("--dsh-pad-bottom", `${this.plugin.settings.bottomPadding}px`);
+      wv.addEventListener("console-message", (e) => {
+        const ev = e;
+        const msg = typeof ev.message === "string" ? ev.message : typeof ev.detail?.message === "string" ? ev.detail.message : "";
+        if (msg.startsWith("__DSHKBD__")) {
+          this.plugin.runHotkeyCombo(msg.slice("__DSHKBD__".length));
+        }
+      });
       wv.addEventListener("did-finish-load", () => {
         settled = true;
         window.clearTimeout(timeoutTimer);
         status.remove();
+        if (!bootRecorded) {
+          bootRecorded = true;
+          const lb = this.plugin.manager.lastBoot;
+          if (lb) lb.stages.push({ label: "\u9762\u677F\u52A0\u8F7D", ms: Date.now() - navStart });
+        }
+        const wvt = wv;
+        void wvt.executeJavaScript(BRIDGE_SOURCE).then(() => this.pushKbdConfig()).catch(() => {
+        });
       });
       wv.addEventListener("did-fail-load", (e) => {
         settled = true;
@@ -8218,14 +8340,6 @@ var DshView = class extends import_obsidian.ItemView {
         if (code === -3) return;
         showError("DSH \u754C\u9762\u52A0\u8F7D\u5931\u8D25\uFF08webview \u9519\u8BEF\uFF09\u3002\u8BF7\u70B9\u51FB\u4E0B\u65B9\u6309\u94AE\u91CD\u542F\u670D\u52A1\u3002");
         this.plugin.updateStatusBar("\u52A0\u8F7D\u5931\u8D25");
-      });
-    } else {
-      const frame = this.contentEl.createEl("iframe", { cls: "dsh-frame" });
-      frame.setAttr("src", url);
-      frame.addEventListener("load", () => {
-        settled = true;
-        window.clearTimeout(timeoutTimer);
-        status.remove();
       });
     }
   }
@@ -8254,6 +8368,24 @@ var DshPlugin = class extends import_obsidian.Plugin {
         void this.openView();
       }
     });
+    this.addCommand({
+      id: "send-selection-to-dsh",
+      name: "\u5C06\u9009\u4E2D\u5185\u5BB9\u53D1\u9001\u5230 DSH",
+      callback: () => {
+        void this.sendSelectionToDsh();
+      }
+    });
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor) => {
+        if (editor.getSelection()) {
+          menu.addItem((item) => {
+            item.setTitle("\u53D1\u9001\u9009\u4E2D\u5185\u5BB9\u5230 DSH").setIcon("message-square").onClick(() => {
+              void this.sendSelectionToDsh();
+            });
+          });
+        }
+      })
+    );
     this.addSettingTab(new DshSettingTab(this.app, this));
     this.statusBar = this.addStatusBarItem();
     this.updateStatusBar("\u5DF2\u505C\u6B62");
@@ -8276,8 +8408,106 @@ var DshPlugin = class extends import_obsidian.Plugin {
     }
     workspace.setActiveLeaf(leaf);
   }
+  /** 找当前 DSH 视图实例（若存在）。 */
+  dshView() {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
+    if (!leaf) return null;
+    const view = leaf.view;
+    return view instanceof DshView ? view : null;
+  }
+  /**
+   * 将当前笔记的选中区域发送到 DSH 草稿：
+   * 构造 DSH 隐式定位行（N words · Lx:y-Lx:y · <库内相对路径>），
+   * DSH 侧按该行读取文件选区（不携带原文，保持剪贴板语义、不贴大段文字）。
+   */
+  sendSelectionToDsh() {
+    return (async () => {
+      const mdView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      if (!mdView) {
+        new import_obsidian.Notice("\u8BF7\u5728\u7B14\u8BB0\u7F16\u8F91\u5668\u4E2D\u9009\u4E2D\u5185\u5BB9\u540E\u518D\u53D1\u9001");
+        return;
+      }
+      const editor = mdView.editor;
+      const text = editor.getSelection();
+      if (!text) {
+        new import_obsidian.Notice("\u672A\u9009\u4E2D\u5185\u5BB9");
+        return;
+      }
+      const from = editor.getCursor("from");
+      const to = editor.getCursor("to");
+      const relPath = mdView.file ? mdView.file.path : "";
+      const implicit = `[ BRIDGES is delivering packages for you\u2026\u2026 \xB7 ${text.length} words \xB7 L${from.line + 1}:${from.ch + 1}-L${to.line + 1}:${to.ch + 1} \xB7 ${relPath} \xB7 ]`;
+      let view = this.dshView();
+      if (!view) {
+        await this.openView();
+        view = this.dshView();
+      }
+      if (!view) {
+        new import_obsidian.Notice("DSH \u9762\u677F\u672A\u80FD\u6253\u5F00");
+        return;
+      }
+      await view.fillDraft(implicit);
+    })();
+  }
   updateStatusBar(text) {
     if (this.statusBar) this.statusBar.setText(`DSH: ${text}`);
+  }
+  // #region 快捷键透传（Obsidian 快捷键 → webview guest 拦截 → console-message 回传 → 执行命令）
+  /** 合并 Obsidian 默认快捷键与用户自定义快捷键，生成 combo→commandId 列表（自定义在后）。 */
+  hotkeyEntries() {
+    const out = [];
+    const app = this.app;
+    try {
+      const defaults = app.hotkeyManager?.defaultHotkeys;
+      if (defaults) {
+        for (const [commandId, entry] of Object.entries(defaults)) {
+          for (const hk of entry?.hotkeys ?? []) {
+            const combo = hotkeyToCombo(hk);
+            if (combo) out.push({ combo, commandId });
+          }
+        }
+      }
+    } catch {
+    }
+    try {
+      for (const cmd of app.commands?.listCommands?.() ?? []) {
+        if (!cmd || typeof cmd.id !== "string" || cmd.id === "" || !Array.isArray(cmd.hotkeys)) continue;
+        for (const hk of cmd.hotkeys) {
+          const combo = hotkeyToCombo(hk);
+          if (combo) out.push({ combo, commandId: cmd.id });
+        }
+      }
+    } catch {
+    }
+    return out;
+  }
+  /** 当前应透传给 webview 的组合键集合（开关关闭 = 空集）。 */
+  buildPassthroughCombos() {
+    if (!this.settings.shortcutPassthrough) return [];
+    return [...new Set(this.hotkeyEntries().map((e) => e.combo))];
+  }
+  /** 执行 guest 回传的组合键对应的 Obsidian 命令（自定义优先于默认）。 */
+  runHotkeyCombo(combo) {
+    const wanted = combo.toLowerCase();
+    const entries = this.hotkeyEntries();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i].combo === wanted) {
+        try {
+          this.app.commands?.executeCommandById?.(entries[i].commandId);
+        } catch {
+        }
+        return;
+      }
+    }
+  }
+  // #endregion
+  /** 快捷键透传开关变化后，向已打开的面板重推配置。 */
+  refreshKbdConfig() {
+    this.dshView()?.pushKbdConfig();
+  }
+  /** 底部留白滑杆变化后，即时应用到已打开的面板。 */
+  refreshBottomPadding() {
+    this.dshView()?.applyBottomPadding(this.settings.bottomPadding);
   }
   async loadSettings() {
     const saved = await this.loadData();
@@ -8426,12 +8656,47 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian.Setting(containerEl).setName("\u5FEB\u6377\u952E\u900F\u4F20").setDesc("\u5F00\u542F\u540E\uFF0C\u7126\u70B9\u5728 DSH \u9762\u677F\u5185\u65F6\uFF0C\u4F60\u5728 Obsidian \u8BBE\u7F6E\u91CC\u914D\u7F6E\u8FC7\u7684\u5168\u5C40\u5FEB\u6377\u952E\uFF08\u5982 Ctrl+P\u3001Ctrl+O\u3001Ctrl+,\uFF09\u4ECD\u4F1A\u89E6\u53D1 Obsidian \u5BF9\u5E94\u547D\u4EE4\uFF0C\u4E0D\u4F1A\u88AB\u7F51\u9875\u541E\u6389\u3002").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.shortcutPassthrough).onChange(async (value) => {
+        this.plugin.settings.shortcutPassthrough = value;
+        await this.plugin.saveSettings();
+        this.plugin.refreshKbdConfig();
+      })
+    );
     new import_obsidian.Setting(containerEl).setName("\u9762\u677F\u4F4D\u7F6E").setDesc("DSH \u9762\u677F\u663E\u793A\u7684\u4F4D\u7F6E\u3002").addDropdown(
       (dropdown) => dropdown.addOption("right-sidebar", "\u53F3\u4FA7\u8FB9\u680F").addOption("left-sidebar", "\u5DE6\u4FA7\u8FB9\u680F").addOption("tab", "\u65B0\u6807\u7B7E\u9875").setValue(this.plugin.settings.viewLocation).onChange(async (value) => {
         this.plugin.settings.viewLocation = value;
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian.Setting(containerEl).setName("\u9762\u677F\u5E95\u90E8\u7559\u767D").setDesc("\u82E5 DSH \u9762\u677F\u5E95\u90E8\u88AB Obsidian \u72B6\u6001\u680F\u906E\u6321\uFF0C\u8C03\u5927\u6B64\u503C\u57AB\u9AD8\u5E95\u90E8\uFF080\u201340px\uFF0C\u9ED8\u8BA4 28\uFF09\u3002\u7559\u767D\u533A\u5E26\u4E0A\u5206\u5272\u7EBF\uFF0C\u80CC\u666F\u900F\u660E\u8DDF\u968F\u4E3B\u9898\u3002").addSlider(
+      (slider) => slider.setLimits(0, 40, 1).setValue(this.plugin.settings.bottomPadding).setDynamicTooltip().onChange(async (value) => {
+        const pad = Math.max(0, Math.min(40, Math.round(value)));
+        this.plugin.settings.bottomPadding = pad;
+        await this.plugin.saveSettings();
+        this.plugin.refreshBottomPadding();
+      })
+    );
+    {
+      const boot = this.plugin.manager.lastBoot;
+      const bootSetting = new import_obsidian.Setting(containerEl).setName("\u542F\u52A8\u8017\u65F6\u8BCA\u65AD").setDesc(
+        boot ? `\u6700\u8FD1\u4E00\u6B21\uFF1A${new Date(boot.startedAt).toLocaleString()} \xB7 ${boot.reused ? "\u590D\u7528\u5B9E\u4F8B" : "\u51B7\u542F\u52A8"} \xB7 \u603B\u8017\u65F6 ${bootTotal(boot).toLocaleString()} ms` : "\u672C\u6B21\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u542F\u52A8\u8BB0\u5F55\u3002\u6253\u5F00\u4E00\u6B21 DSH \u9762\u677F\u540E\u56DE\u5230\u8FD9\u91CC\u67E5\u770B\u3002"
+      );
+      if (boot) {
+        containerEl.createDiv({ cls: "dsh-boot-trace" }).createEl("pre", { text: formatBootTrace(boot).join("\n") });
+      }
+      bootSetting.addButton(
+        (b) => b.setButtonText("\u590D\u5236\u8BE6\u60C5").onClick(() => {
+          const t = this.plugin.manager.lastBoot;
+          if (!t) {
+            new import_obsidian.Notice("\u6682\u65E0\u542F\u52A8\u8BB0\u5F55");
+            return;
+          }
+          void navigator.clipboard.writeText(formatBootTrace(t).join("\n"));
+          new import_obsidian.Notice("\u542F\u52A8\u8017\u65F6\u8BE6\u60C5\u5DF2\u590D\u5236");
+        })
+      );
+    }
   }
   /** Obsidian 1.13+ settings search integration (optional but recommended). */
   getSettingDefinitions() {

@@ -6,17 +6,22 @@ Embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (D
 
 **Why you'll want it:**
 
-- 🔀 **rc / alpha kernels both supported** — old session data is migrated automatically on upgrade, so history survives kernel jumps (browser-auth alpha works out of the box)
 - 🗂 **One instance per vault** — isolated port, data directory and sessions per vault; open several vaults side by side, zero interference
-- 🎛 **You decide when to update** — stable / alpha channels in settings; updates only install after explicit confirmation. **No silent upgrades, ever.**
+- 🧲 **Selection → DSH bridge** — right-click selected text in a note and DSH gets the exact file + line range; the model reads that region itself, no copy-paste round-trips
+- ⌨️ **Hotkeys that don't get eaten** — the Obsidian shortcuts you configured keep working while the DSH panel has focus
+- 🎛 **You decide when to update** — tracks the official stable channel; updates install only after explicit confirmation. **No silent upgrades, ever.**
 
 ## Features
 
-- **Native webview embed**: the real DSH UI inside the panel (token-authenticated, direct to localhost — no proxy layer), identical to the browser experience
-- **rc / alpha compatibility + automatic data migration**: upgrading to alpha (browser-auth edition) auto-migrates old session data (both single-file and sharded storage layouts), history carried over seamlessly
+- **Embedded webview UI**: the real DSH interface runs in a dedicated Electron webview (persistent per-vault session storage, cookie-safe token auth) — identical to the browser experience
+- **Send selection to DSH**: right-click (or command palette) on selected text — a locator line (file + `L:col` range) lands in the DSH composer; the model reads the region on demand
+- **Hotkey passthrough**: Obsidian shortcuts (Command palette, Quick switcher, Settings…) keep firing while focus is inside the DSH panel — mirrors your own hotkey configuration, one toggle in settings
+- **Boot diagnostics**: settings shows a per-stage timing trace of the last panel start (config sync / probe / port / kernel / UI load), one-click copy for bug reports
+- **Bottom padding**: adjustable 0–40px footer with a divider line, so the Obsidian status bar never covers panel content
+- **Automatic data migration**: upgrading an older kernel to the current browser-auth release auto-migrates session data (single-file and sharded layouts), history carried over seamlessly
 - **Backup before migration**: old data is backed up locally before any migration — custom path supported, one click to reveal the backup folder in Explorer
 - **Per-vault isolation**: vault-dedicated data dir (`%LOCALAPPDATA%\dsh-obsidian\<vaultHash>`) keeps notes clean, skips OneDrive sync, and separates sessions between vaults completely
-- **Kernel version of your choice**: pick the **stable** or **alpha experience** channel in settings; check updates per channel; install only after confirmation — startup never touches the network to change versions
+- **Updates only on confirmation**: check for the newest stable kernel in settings; install happens only after you confirm — startup never touches the network to change versions
 - **Registry mirror fallback**: npm official source fails → auto-switches to the npmmirror mirror (friendlier on mainland networks)
 - **Visible install progress**: persistent global notice with elapsed-time ticker, plus clear success/failure result — no more "did it actually install?"
 - **Model config once, used everywhere**: one-way sync of providers & API credentials from your main DSH to every vault — add a vendor/key once, no per-vault re-setup
@@ -50,21 +55,16 @@ Settings → Community plugins → Browse → search "DSH for Vaults" → Instal
 1. **Open the panel**: whale icon in the left ribbon, or Ctrl+P → "Open DSH panel"
 2. **Wait for startup**: the panel shows "Starting @ port …", then loads the DSH UI with your vault as the workspace (first launch ~10–30 s while npx installs the kernel)
 3. **Chat**: the active workspace is your vault — manage notes with AI right away
-4. **Status bar**: bottom-left shows the instance state (`DSH: running @ 3090`)
+4. **Work with notes**: select text in any note → right-click → "Send selection to DSH" — DSH reads exactly that region
+5. **Status bar**: bottom-left shows the instance state (`DSH: running @ 3090`)
 
 ## Kernel versions & update policy
 
 **No auto-updates, by default.** Startup only uses locally installed kernel versions (picks the highest one) and never goes online to change versions.
 
-When you want a new version — Settings → "dsh version update":
+When you want a new version — Settings → "dsh version update": the plugin checks the official **stable channel** (npm `latest`) and installs only after you confirm.
 
-| Channel | What it tracks |
-|---------|----------------|
-| **Stable** | npm official channel (`latest`) — whatever the official release is |
-| **alpha experience** | npm preview channel (`alpha`) — newest capabilities (e.g. the browser-auth Web UI) |
-
-- Pick a channel → "Check update" → confirm the popup → install (progress fully visible)
-- Upgrading from older kernels to alpha **auto-migrates session data and backs it up first** — history survives
+- Upgrading from older kernels **auto-migrates session data and backs it up first** — history survives
 - Flaky network? Auto-falls back to the npmmirror mirror for queries and downloads
 
 ## Multi-vault behavior (one instance per vault)
@@ -106,12 +106,15 @@ Conflict handling: provider/credential dictionaries use a **union merge** (vault
 | Setting | Description |
 |---------|-------------|
 | dsh executable path | Leave empty for auto-detection (npm global → managed dir → npx cache → online npx); fill manually only if detection fails |
-| dsh version update | Channel dropdown (stable / alpha experience) + check-update button; installs only after confirmation |
+| dsh version update | Check the stable channel for updates; installs only after confirmation |
 | Data backup dir | Old data backed up here before migration; empty = default dir (path shown), 📁 reveals the folder in Explorer |
 | Base port | Port pool start (default 3090, avoids the common desktop port 3080) |
 | Auto-start on Obsidian open | Starts the vault's instance automatically |
 | Stop instance on Obsidian close | Frees memory on close; disable to keep it resident for instant relaunch |
+| Hotkey passthrough | Obsidian shortcuts keep working while the DSH panel is focused (mirrors your hotkey settings) |
 | Panel location | Right sidebar / Left sidebar / Tab |
+| Panel bottom padding | 0–40px footer gap with a divider line, live-adjustable |
+| Boot timing diagnostics | Per-stage timing of the last startup, one-click copy for feedback |
 
 ## FAQ
 
@@ -119,6 +122,7 @@ Conflict handling: provider/credential dictionaries use a **union merge** (vault
 - **Blank panel**: confirm the status bar says "running"; if still blank, restart Obsidian
 - **Slow first launch**: expected — npx downloads the DSH package; subsequent launches are instant
 - **Old status after switching vaults**: each vault has its own instance; the status bar shows the current window's instance
+- **An Obsidian shortcut doesn't fire inside the panel**: only shortcuts actually bound in Obsidian's hotkey settings are forwarded — if the key does nothing in plain Obsidian either, bind it first (Settings → Hotkeys)
 
 ## Development
 
