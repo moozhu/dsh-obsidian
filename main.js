@@ -7367,6 +7367,7 @@ var import_child_process = require("child_process");
 var import_crypto = require("crypto");
 var import_fs = require("fs");
 var import_http = require("http");
+var import_https = require("https");
 var import_os = require("os");
 var import_path = require("path");
 var import_yaml = __toESM(require_dist());
@@ -7553,6 +7554,265 @@ function probeNode(timeoutMs = 8e3) {
       resolve(code === 0);
     });
   });
+}
+function findNodeInstallDir() {
+  const pf = process.env["ProgramFiles"] ?? "C:\\Program Files";
+  const pf86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+  const localAppData = process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local");
+  const candidates = [
+    (0, import_path.join)(localAppData, "dsh-obsidian", "node"),
+    (0, import_path.join)(pf, "nodejs"),
+    (0, import_path.join)(pf86, "nodejs"),
+    (0, import_path.join)(localAppData, "Programs", "nodejs"),
+    process.env["NVM_SYMLINK"] ?? "",
+    (0, import_path.join)((0, import_os.homedir)(), "scoop", "apps", "nodejs", "current")
+  ];
+  for (const dir of candidates) {
+    if (!dir) continue;
+    const nodeExe = (0, import_path.join)(dir, "node.exe");
+    const npxCmd = (0, import_path.join)(dir, "npx.cmd");
+    if (!(0, import_fs.existsSync)(nodeExe) || !(0, import_fs.existsSync)(npxCmd)) continue;
+    try {
+      (0, import_child_process.execFileSync)(nodeExe, ["--version"], { windowsHide: true, timeout: 5e3, stdio: "ignore" });
+      return dir;
+    } catch {
+    }
+  }
+  return null;
+}
+function portableNodeDir() {
+  const localAppData = process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local");
+  return (0, import_path.join)(localAppData, "dsh-obsidian", "node");
+}
+function httpGetText(url, inactivityMs, hops = 0) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (e) => {
+      if (settled) return;
+      settled = true;
+      reject(e instanceof Error ? e : new Error(String(e)));
+    };
+    const req = (0, import_https.get)(url, (res) => {
+      const code = res.statusCode ?? 0;
+      if (code >= 300 && code < 400 && res.headers.location && hops < 3) {
+        res.destroy();
+        httpGetText(new URL(res.headers.location, url).toString(), inactivityMs, hops + 1).then(resolve, fail);
+        return;
+      }
+      if (code !== 200) {
+        res.destroy();
+        fail(new Error(`HTTP ${code} ${url}`));
+        return;
+      }
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => {
+        body += c;
+      });
+      res.on("end", () => {
+        if (settled) return;
+        settled = true;
+        resolve(body);
+      });
+      res.on("error", fail);
+    });
+    req.setTimeout(inactivityMs, () => req.destroy(new Error(`\u8BF7\u6C42\u8D85\u65F6\uFF1A${url}`)));
+    req.on("error", fail);
+  });
+}
+function downloadToFile(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const part = `${dest}.part`;
+    const fail = (e) => {
+      if (settled) return;
+      settled = true;
+      try {
+        (0, import_fs.rmSync)(part, { force: true });
+      } catch {
+      }
+      reject(e instanceof Error ? e : new Error(String(e)));
+    };
+    const attempt = (u, hops) => {
+      const req = (0, import_https.get)(u, (res) => {
+        const code = res.statusCode ?? 0;
+        if (code >= 300 && code < 400 && res.headers.location && hops < 3) {
+          res.destroy();
+          attempt(new URL(res.headers.location, u).toString(), hops + 1);
+          return;
+        }
+        if (code !== 200) {
+          res.destroy();
+          fail(new Error(`HTTP ${code} ${u}`));
+          return;
+        }
+        const total = Number(res.headers["content-length"] ?? 0);
+        let got = 0;
+        const out = (0, import_fs.createWriteStream)(part);
+        res.on("data", (c) => {
+          got += c.length;
+          onProgress(got, total);
+        });
+        res.pipe(out);
+        out.on("finish", () => {
+          out.close(() => {
+            try {
+              (0, import_fs.renameSync)(part, dest);
+            } catch (e) {
+              return fail(e);
+            }
+            if (!settled) {
+              settled = true;
+              resolve();
+            }
+          });
+        });
+        out.on("error", fail);
+        res.on("error", fail);
+      });
+      req.setTimeout(45e3, () => req.destroy(new Error(`\u4E0B\u8F7D\u8D85\u65F6\uFF0845s \u65E0\u54CD\u5E94\uFF09\uFF1A${u}`)));
+      req.on("error", fail);
+    };
+    attempt(url, 0);
+  });
+}
+function extractZip(zipPath, destDir) {
+  return new Promise((resolve) => {
+    const tar = (0, import_child_process.spawn)("tar", ["-xf", zipPath, "-C", destDir], {
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    let tarErr = "";
+    tar.stderr?.on("data", (d) => {
+      tarErr += d.toString();
+    });
+    tar.on("error", (e) => resolve(`tar \u4E0D\u53EF\u7528\uFF1A${e.message}`));
+    tar.on("close", (code) => {
+      if (code === 0) {
+        resolve(null);
+        return;
+      }
+      const ps = (0, import_child_process.spawn)(
+        "powershell",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`
+        ],
+        { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] }
+      );
+      let psErr = "";
+      ps.stderr?.on("data", (d) => {
+        psErr += d.toString();
+      });
+      ps.on("error", () => resolve((tarErr + " | powershell \u4E0D\u53EF\u7528").trim()));
+      ps.on("close", (c2) => resolve(c2 === 0 ? null : `${tarErr} ${psErr}`.trim() || "\u89E3\u538B\u5931\u8D25"));
+    });
+  });
+}
+async function installNodePortable(onState) {
+  const localAppData = process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local");
+  const base = (0, import_path.join)(localAppData, "dsh-obsidian");
+  const finalDir = portableNodeDir();
+  const existingExe = (0, import_path.join)(finalDir, "node.exe");
+  if ((0, import_fs.existsSync)(existingExe)) {
+    try {
+      (0, import_child_process.execFileSync)(existingExe, ["--version"], { windowsHide: true, timeout: 8e3, stdio: "ignore" });
+      return null;
+    } catch {
+    }
+  }
+  onState("\u6B63\u5728\u67E5\u8BE2 Node.js \u6700\u65B0 LTS \u7248\u672C ...");
+  const arch = process.arch === "arm64" ? "win-arm64" : "win-x64";
+  const filesNeed = `${arch}-zip`;
+  let version = null;
+  for (const idxUrl of [
+    "https://npmmirror.com/mirrors/node/index.json",
+    "https://nodejs.org/dist/index.json"
+  ]) {
+    try {
+      const list = JSON.parse(await httpGetText(idxUrl, 2e4));
+      const hit = list.find(
+        (e) => e.version && e.lts !== false && Array.isArray(e.files) && e.files.includes(filesNeed)
+      );
+      if (hit?.version) {
+        version = hit.version;
+        break;
+      }
+    } catch {
+    }
+  }
+  if (!version) {
+    return "npmmirror \u4E0E nodejs.org \u90FD\u53D6\u4E0D\u5230\u7248\u672C\u4FE1\u606F\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5\uFF0C\u6216\u6309\u4E0B\u65B9\u624B\u52A8\u5B89\u88C5";
+  }
+  const zipName = `node-${version}-${arch}.zip`;
+  const tmp = (0, import_path.join)(base, "node-setup");
+  try {
+    (0, import_fs.rmSync)(tmp, { recursive: true, force: true });
+  } catch {
+  }
+  (0, import_fs.mkdirSync)(tmp, { recursive: true });
+  const zipPath = (0, import_path.join)(tmp, zipName);
+  let downloaded = false;
+  let lastErr = "";
+  for (const mirror of [
+    `https://npmmirror.com/mirrors/node/${version}/${zipName}`,
+    `https://nodejs.org/dist/${version}/${zipName}`
+  ]) {
+    try {
+      onState(`\u6B63\u5728\u4E0B\u8F7D Node.js ${version} ...`);
+      let lastPaint = 0;
+      await downloadToFile(mirror, zipPath, (got, total) => {
+        const now = Date.now();
+        if (now - lastPaint < 300 && got !== total) return;
+        lastPaint = now;
+        const mb = (n) => (n / 1048576).toFixed(1);
+        onState(
+          `\u6B63\u5728\u4E0B\u8F7D Node.js ${version} ... ${mb(got)} MB${total ? ` / ${mb(total)} MB` : ""}`
+        );
+      });
+      downloaded = true;
+      break;
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+    }
+  }
+  if (!downloaded) return `\u4E0B\u8F7D\u5931\u8D25\uFF1A${lastErr}\uFF08\u8BF7\u68C0\u67E5\u7F51\u7EDC\uFF0C\u6216\u6309\u4E0B\u65B9\u624B\u52A8\u5B89\u88C5\uFF09`;
+  onState("\u6B63\u5728\u89E3\u538B Node.js ...");
+  const extDir = (0, import_path.join)(tmp, "ext");
+  try {
+    (0, import_fs.mkdirSync)(extDir, { recursive: true });
+  } catch {
+  }
+  const extErr = await extractZip(zipPath, extDir);
+  if (extErr) return `\u89E3\u538B\u5931\u8D25\uFF1A${extErr}`;
+  const inner = (0, import_path.join)(extDir, `node-${version}-${arch}`);
+  if (!(0, import_fs.existsSync)((0, import_path.join)(inner, "node.exe"))) return "\u538B\u7F29\u5305\u7ED3\u6784\u5F02\u5E38\uFF1A\u89E3\u538B\u540E\u672A\u627E\u5230 node.exe";
+  try {
+    if ((0, import_fs.existsSync)(finalDir)) (0, import_fs.renameSync)(finalDir, `${finalDir}.old-${Date.now()}`);
+    (0, import_fs.renameSync)(inner, finalDir);
+  } catch (e) {
+    return `\u5B89\u88C5\u76EE\u5F55\u5199\u5165\u5931\u8D25\uFF1A${e instanceof Error ? e.message : String(e)}`;
+  }
+  try {
+    for (const s of (0, import_fs.readdirSync)(base)) {
+      if (s.startsWith("node.old-")) (0, import_fs.rmSync)((0, import_path.join)(base, s), { recursive: true, force: true });
+    }
+    (0, import_fs.rmSync)(tmp, { recursive: true, force: true });
+  } catch {
+  }
+  onState("\u9A8C\u8BC1\u5B89\u88C5 ...");
+  try {
+    (0, import_child_process.execFileSync)((0, import_path.join)(finalDir, "node.exe"), ["--version"], {
+      windowsHide: true,
+      timeout: 8e3,
+      stdio: "ignore"
+    });
+  } catch {
+    return "Node \u5DF2\u5B89\u88C5\u4F46\u65E0\u6CD5\u8FD0\u884C\uFF08\u53EF\u80FD\u88AB\u6740\u8F6F\u62E6\u622A\uFF09\uFF0C\u8BF7\u6309\u4E0B\u65B9\u624B\u52A8\u5B89\u88C5";
+  }
+  return null;
 }
 function managedDshDir() {
   const localAppData = process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local");
@@ -7903,25 +8163,25 @@ function patchIdentity(rec) {
   }
   return changed;
 }
-function resolveBootCommand(settings, port) {
+function resolveBootCommand(settings, port, nodeBinDir) {
   const custom = settings.dshCommand.trim();
   if (custom) return { command: `"${custom}" web --port ${port} --no-open`, npxOnly: false, version: null };
   const best = pickBestInstall(detectDshInstalls());
   if (best) {
     return { command: `"${best.cmd}" web --port ${port} --no-open`, npxOnly: false, version: best.version };
   }
-  return { command: `npx --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true, version: null };
+  const npx = nodeBinDir ? `"${(0, import_path.join)(nodeBinDir, "npx.cmd")}"` : "npx";
+  return { command: `${npx} --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true, version: null };
 }
-function spawnDsh(bootCommand, vaultPath) {
+function spawnDsh(bootCommand, vaultPath, nodeBinDir) {
+  const env = { ...process.env, DSH_HOME: vaultHome(vaultPath) };
+  if (nodeBinDir) env.PATH = `${nodeBinDir};${env.PATH ?? ""}`;
   const child = (0, import_child_process.spawn)(bootCommand, {
     shell: true,
     cwd: vaultPath,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      DSH_HOME: vaultHome(vaultPath)
-    }
+    env
   });
   let log = "";
   const collect = (d) => {
@@ -8107,17 +8367,23 @@ var InstanceManager = class {
       }
       mark("\u590D\u7528\u63A2\u6D4B\uFF08\u672A\u547D\u4E2D\uFF0C\u6E05\u7406\u91CD\u5EFA\uFF09");
     }
+    let nodeBinDir = null;
+    let nodeVia = "PATH";
     if (!await probeNode()) {
-      throw new BootError("\u672A\u68C0\u6D4B\u5230 Node.js\uFF08DSH \u4F9D\u8D56\u5B83\u8FD0\u884C\uFF09", true);
+      nodeBinDir = findNodeInstallDir();
+      if (!nodeBinDir) {
+        throw new BootError("\u672A\u68C0\u6D4B\u5230 Node.js\uFF08DSH \u4F9D\u8D56\u5B83\u8FD0\u884C\uFF09", true);
+      }
+      nodeVia = `\u7EDD\u5BF9\u8DEF\u5F84\u515C\u5E95\uFF08${nodeBinDir}\uFF09`;
     }
-    mark("Node \u68C0\u6D4B");
+    mark(`Node \u68C0\u6D4B\uFF08${nodeVia}\uFF09`);
     let port = this.vaultPort(vaultPath);
     for (let i = 0; i < 100; i++) {
       if (!await probeAnyHttp(port)) break;
       port++;
     }
     mark("\u7AEF\u53E3\u5206\u914D");
-    const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port);
+    const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port, nodeBinDir);
     const dshHome = vaultHome(vaultPath);
     if (needsAuthVersion(version)) {
       const backupDir = settings.backupDir.trim() || (0, import_path.join)(dshHome, "backups");
@@ -8128,7 +8394,7 @@ var InstanceManager = class {
     onState?.(
       npxOnly ? `\u6B63\u5728\u4E0B\u8F7D\u5B89\u88C5 dsh \u5185\u6838\uFF08\u9996\u6B21\u5728\u7EBF\u5B89\u88C5\uFF0C\u7EA6\u9700 1-5 \u5206\u949F\uFF09...` : `\u6B63\u5728\u542F\u52A8 @ ${port} ...`
     );
-    const child = spawnDsh(bootCommand, vaultPath);
+    const child = spawnDsh(bootCommand, vaultPath, nodeBinDir);
     const pid = child?.pid;
     mark("\u8FDB\u7A0B\u62C9\u8D77");
     const getLog = () => child?.__getLog?.() ?? "";
@@ -8310,13 +8576,32 @@ var DshView = class extends import_obsidian.ItemView {
       const message = error instanceof Error ? error.message : String(error);
       status.setText(`\u542F\u52A8\u5931\u8D25\uFF1A${message}`);
       if (error instanceof BootError && error.nodeMissing) {
-        const link = status.createEl("a", {
-          text: "\u4E0B\u8F7D Node.js\uFF08nodejs.org/zh-cn\uFF09",
-          href: "https://nodejs.org/zh-cn"
+        status.createDiv({
+          text: "\u68C0\u6D4B\u5230\u672C\u673A\u6CA1\u6709 Node.js\u3002DSH \u4F9D\u8D56\u5B83\u8FD0\u884C\u2014\u2014\u53EF\u4EE5\u4E00\u952E\u5B89\u88C5\uFF08\u514D\u7BA1\u7406\u5458\u6743\u9650\u3001\u4E0D\u6539\u52A8\u7CFB\u7EDF\uFF09\uFF0C\u4E5F\u53EF\u4EE5\u81EA\u5DF1\u88C5\u5B98\u65B9\u7248\u672C\u3002"
         });
+        const progress = status.createDiv();
+        const btn = status.createEl("button", { text: "\u4E00\u952E\u5B89\u88C5 Node.js\uFF08\u7EA6 30MB\uFF09" });
+        btn.onclick = () => {
+          btn.disabled = true;
+          progress.setText("\u51C6\u5907\u4E2D ...");
+          void installNodePortable((s) => progress.setText(s)).then((err) => {
+            if (err === null) {
+              progress.setText("Node \u5C31\u7EEA\uFF0C\u6B63\u5728\u542F\u52A8 DSH ...");
+              void this.loadPanel();
+              return;
+            }
+            btn.disabled = false;
+            btn.setText("\u91CD\u8BD5\u4E00\u952E\u5B89\u88C5");
+            progress.setText(`\u4E00\u952E\u5B89\u88C5\u5931\u8D25\uFF1A${err}`);
+            manual.show();
+          });
+        };
+        const manual = status.createDiv({ text: "\u624B\u52A8\u5B89\u88C5\uFF1A\u4E0B\u8F7D\u5E76\u8FD0\u884C LTS \u5B89\u88C5\u5668 " });
+        const link = manual.createEl("a", { text: "nodejs.org/zh-cn", href: "https://nodejs.org/zh-cn" });
         link.setAttr("target", "_blank");
         link.setAttr("rel", "noopener");
-        status.createDiv({ text: "\u5B89\u88C5\u540E\u91CD\u65B0\u6253\u5F00\u9762\u677F\u5373\u53EF\u3002" });
+        manual.createDiv({ text: "\u5B89\u88C5\u5B8C\u6210\u540E\u9700\u5B8C\u5168\u91CD\u542F Obsidian\uFF08\u5426\u5219\u65B0 PATH \u4E0D\u751F\u6548\uFF09\uFF1B\u82E5\u4E00\u952E\u5B89\u88C5\u5931\u8D25\u4E5F\u8BF7\u52A1\u5FC5\u91CD\u542F\u540E\u518D\u8BD5\u3002" });
+        manual.hide();
       }
       this.plugin.updateStatusBar("\u542F\u52A8\u5931\u8D25");
       new import_obsidian.Notice(`DSH \u542F\u52A8\u5931\u8D25\uFF1A${message}`, 1e4);

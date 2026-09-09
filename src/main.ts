@@ -13,8 +13,9 @@ import {
 } from "obsidian";
 import { execFileSync, spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
 import { get } from "http";
+import { get as httpsGet } from "https";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { parseDocument, Document } from "yaml";
@@ -364,6 +365,309 @@ function probeNode(timeoutMs = 8000): Promise<boolean> {
     });
   });
 }
+
+/**
+ * PATH 探测失败后按绝对路径扫描常见 Node 安装位置，返回可用安装目录（含 node.exe + npx.cmd）。
+ * 救场两类高频误报：① 用户装了 Node 但 Obsidian 未重启（子进程 PATH 是启动时的快照）；
+ * ② 装完忘了、或安装器没写 PATH。用绝对路径 `node -v` 实测可运行，避免卸载残留目录假阳性。
+ * 首位是插件便携目录（一键装 Node 落点）。
+ */
+function findNodeInstallDir(): string | null {
+  const pf = process.env["ProgramFiles"] ?? "C:\\Program Files";
+  const pf86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+  const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+  const candidates = [
+    join(localAppData, "dsh-obsidian", "node"),
+    join(pf, "nodejs"),
+    join(pf86, "nodejs"),
+    join(localAppData, "Programs", "nodejs"),
+    process.env["NVM_SYMLINK"] ?? "",
+    join(homedir(), "scoop", "apps", "nodejs", "current"),
+  ];
+  for (const dir of candidates) {
+    if (!dir) continue;
+    const nodeExe = join(dir, "node.exe");
+    const npxCmd = join(dir, "npx.cmd");
+    if (!existsSync(nodeExe) || !existsSync(npxCmd)) continue;
+    try {
+      execFileSync(nodeExe, ["--version"], { windowsHide: true, timeout: 5000, stdio: "ignore" });
+      return dir;
+    } catch {
+      /* 目录存在但不可运行：试下一个候选 */
+    }
+  }
+  return null;
+}
+
+//#region Node 一键装（便携 zip：不动系统、不要管理员、不写 PATH）
+
+/** 便携 Node 安装目录（一键装落点，findNodeInstallDir 首位候选）。 */
+function portableNodeDir(): string {
+  const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+  return join(localAppData, "dsh-obsidian", "node");
+}
+
+/** 带重定向的 HTTP(S) GET 全文（超时=不活动超时）。 */
+function httpGetText(url: string, inactivityMs: number, hops = 0): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (e: unknown): void => {
+      if (settled) return;
+      settled = true;
+      reject(e instanceof Error ? e : new Error(String(e)));
+    };
+    const req = httpsGet(url, (res) => {
+      const code = res.statusCode ?? 0;
+      if (code >= 300 && code < 400 && res.headers.location && hops < 3) {
+        res.destroy();
+        httpGetText(new URL(res.headers.location, url).toString(), inactivityMs, hops + 1).then(resolve, fail);
+        return;
+      }
+      if (code !== 200) {
+        res.destroy();
+        fail(new Error(`HTTP ${code} ${url}`));
+        return;
+      }
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (c: string) => {
+        body += c;
+      });
+      res.on("end", () => {
+        if (settled) return;
+        settled = true;
+        resolve(body);
+      });
+      res.on("error", fail);
+    });
+    req.setTimeout(inactivityMs, () => req.destroy(new Error(`请求超时：${url}`)));
+    req.on("error", fail);
+  });
+}
+
+/** 下载文件（.part → 完整后改名；进度回调 字节）。 */
+function downloadToFile(url: string, dest: string, onProgress: (got: number, total: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const part = `${dest}.part`;
+    const fail = (e: unknown): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        rmSync(part, { force: true });
+      } catch {
+        /* 忽略 */
+      }
+      reject(e instanceof Error ? e : new Error(String(e)));
+    };
+    const attempt = (u: string, hops: number): void => {
+      const req = httpsGet(u, (res) => {
+        const code = res.statusCode ?? 0;
+        if (code >= 300 && code < 400 && res.headers.location && hops < 3) {
+          res.destroy();
+          attempt(new URL(res.headers.location, u).toString(), hops + 1);
+          return;
+        }
+        if (code !== 200) {
+          res.destroy();
+          fail(new Error(`HTTP ${code} ${u}`));
+          return;
+        }
+        const total = Number(res.headers["content-length"] ?? 0);
+        let got = 0;
+        const out = createWriteStream(part);
+        res.on("data", (c: Buffer) => {
+          got += c.length;
+          onProgress(got, total);
+        });
+        res.pipe(out);
+        out.on("finish", () => {
+          out.close(() => {
+            try {
+              renameSync(part, dest);
+            } catch (e) {
+              return fail(e);
+            }
+            if (!settled) {
+              settled = true;
+              resolve();
+            }
+          });
+        });
+        out.on("error", fail);
+        res.on("error", fail);
+      });
+      req.setTimeout(45_000, () => req.destroy(new Error(`下载超时（45s 无响应）：${u}`)));
+      req.on("error", fail);
+    };
+    attempt(url, 0);
+  });
+}
+
+/** 解压 zip：Win10 1803+ 自带 bsdtar；失败回退 PowerShell Expand-Archive。返回错误文本（null=成功）。 */
+function extractZip(zipPath: string, destDir: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const tar = spawn("tar", ["-xf", zipPath, "-C", destDir], {
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let tarErr = "";
+    tar.stderr?.on("data", (d: Buffer) => {
+      tarErr += d.toString();
+    });
+    tar.on("error", (e) => resolve(`tar 不可用：${e.message}`));
+    tar.on("close", (code) => {
+      if (code === 0) {
+        resolve(null);
+        return;
+      }
+      const ps = spawn(
+        "powershell",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`,
+        ],
+        { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] }
+      );
+      let psErr = "";
+      ps.stderr?.on("data", (d: Buffer) => {
+        psErr += d.toString();
+      });
+      ps.on("error", () => resolve((tarErr + " | powershell 不可用").trim()));
+      ps.on("close", (c2) => resolve(c2 === 0 ? null : `${tarErr} ${psErr}`.trim() || "解压失败"));
+    });
+  });
+}
+
+/**
+ * 一键装便携 Node：查 LTS → 下载（npmmirror 主 / nodejs.org 备）→ 解压 → 原子落位 → 实测可运行。
+ * 返回 null=成功；文本=失败原因（调用方据此降级到手动引导）。
+ */
+async function installNodePortable(onState: (s: string) => void): Promise<string | null> {
+  const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+  const base = join(localAppData, "dsh-obsidian");
+  const finalDir = portableNodeDir();
+
+  // 已有可运行的便携安装 → 直接复用（版本保持当初所装；想追新可整体重下覆盖）
+  const existingExe = join(finalDir, "node.exe");
+  if (existsSync(existingExe)) {
+    try {
+      execFileSync(existingExe, ["--version"], { windowsHide: true, timeout: 8000, stdio: "ignore" });
+      return null;
+    } catch {
+      /* 损坏：继续走完整安装覆盖 */
+    }
+  }
+
+  onState("正在查询 Node.js 最新 LTS 版本 ...");
+  const arch = process.arch === "arm64" ? "win-arm64" : "win-x64";
+  const filesNeed = `${arch}-zip`;
+  let version: string | null = null;
+  for (const idxUrl of [
+    "https://npmmirror.com/mirrors/node/index.json",
+    "https://nodejs.org/dist/index.json",
+  ]) {
+    try {
+      const list = JSON.parse(await httpGetText(idxUrl, 20_000)) as Array<{
+        version?: string;
+        lts?: string | false;
+        files?: string[];
+      }>;
+      const hit = list.find(
+        (e) => e.version && e.lts !== false && Array.isArray(e.files) && e.files.includes(filesNeed)
+      );
+      if (hit?.version) {
+        version = hit.version;
+        break;
+      }
+    } catch {
+      /* 换下一个镜像源 */
+    }
+  }
+  if (!version) {
+    return "npmmirror 与 nodejs.org 都取不到版本信息，请检查网络后重试，或按下方手动安装";
+  }
+
+  const zipName = `node-${version}-${arch}.zip`;
+  const tmp = join(base, "node-setup");
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {
+    /* 忽略 */
+  }
+  mkdirSync(tmp, { recursive: true });
+  const zipPath = join(tmp, zipName);
+
+  let downloaded = false;
+  let lastErr = "";
+  for (const mirror of [
+    `https://npmmirror.com/mirrors/node/${version}/${zipName}`,
+    `https://nodejs.org/dist/${version}/${zipName}`,
+  ]) {
+    try {
+      onState(`正在下载 Node.js ${version} ...`);
+      let lastPaint = 0;
+      await downloadToFile(mirror, zipPath, (got, total) => {
+        const now = Date.now();
+        if (now - lastPaint < 300 && got !== total) return; // 限频，避免状态文本刷屏
+        lastPaint = now;
+        const mb = (n: number): string => (n / 1048576).toFixed(1);
+        onState(
+          `正在下载 Node.js ${version} ... ${mb(got)} MB${total ? ` / ${mb(total)} MB` : ""}`
+        );
+      });
+      downloaded = true;
+      break;
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+    }
+  }
+  if (!downloaded) return `下载失败：${lastErr}（请检查网络，或按下方手动安装）`;
+
+  onState("正在解压 Node.js ...");
+  const extDir = join(tmp, "ext");
+  try {
+    mkdirSync(extDir, { recursive: true });
+  } catch {
+    /* 已存在 */
+  }
+  const extErr = await extractZip(zipPath, extDir);
+  if (extErr) return `解压失败：${extErr}`;
+  const inner = join(extDir, `node-${version}-${arch}`);
+  if (!existsSync(join(inner, "node.exe"))) return "压缩包结构异常：解压后未找到 node.exe";
+
+  try {
+    if (existsSync(finalDir)) renameSync(finalDir, `${finalDir}.old-${Date.now()}`);
+    renameSync(inner, finalDir);
+  } catch (e) {
+    return `安装目录写入失败：${e instanceof Error ? e.message : String(e)}`;
+  }
+  // 清理旧代与临时文件（尽力而为）
+  try {
+    for (const s of readdirSync(base)) {
+      if (s.startsWith("node.old-")) rmSync(join(base, s), { recursive: true, force: true });
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {
+    /* 忽略 */
+  }
+
+  onState("验证安装 ...");
+  try {
+    execFileSync(join(finalDir, "node.exe"), ["--version"], {
+      windowsHide: true,
+      timeout: 8000,
+      stdio: "ignore",
+    });
+  } catch {
+    return "Node 已安装但无法运行（可能被杀软拦截），请按下方手动安装";
+  }
+  return null;
+}
+
+//#endregion
 
 //#endregion
 
@@ -887,7 +1191,8 @@ function patchIdentity(rec: { identity?: Record<string, unknown> } | undefined |
  */
 function resolveBootCommand(
   settings: DshSettings,
-  port: number
+  port: number,
+  nodeBinDir?: string | null
 ): { command: string; npxOnly: boolean; version: string | null } {
   const custom = settings.dshCommand.trim();
   if (custom) return { command: `"${custom}" web --port ${port} --no-open`, npxOnly: false, version: null };
@@ -895,7 +1200,9 @@ function resolveBootCommand(
   if (best) {
     return { command: `"${best.cmd}" web --port ${port} --no-open`, npxOnly: false, version: best.version };
   }
-  return { command: `npx --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true, version: null };
+  // 在线 npx：发现过绝对路径安装目录时用完整 npx.cmd（PATH 里没有 node 的场景）
+  const npx = nodeBinDir ? `"${join(nodeBinDir, "npx.cmd")}"` : "npx";
+  return { command: `${npx} --yes @deepseek-ai/dsh web --port ${port} --no-open`, npxOnly: true, version: null };
 }
 
 /**
@@ -904,16 +1211,20 @@ function resolveBootCommand(
  * 这样启动失败时（端口被占、依赖缺失、npx 拉取失败等）能在面板里看到真实报错，
  * 而不是只得到一个笼统的"超时"。返回的 ChildProcess 上挂了 __getLog() 供超时兜底读取。
  */
-function spawnDsh(bootCommand: string, vaultPath: string): ChildProcess | undefined {
+function spawnDsh(
+  bootCommand: string,
+  vaultPath: string,
+  nodeBinDir?: string | null
+): ChildProcess | undefined {
+  const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: vaultHome(vaultPath) };
+  // PATH 无 node 但扫到了安装目录：把目录前置，npx 生成的 .bin 垫片找 node 也能命中
+  if (nodeBinDir) env.PATH = `${nodeBinDir};${env.PATH ?? ""}`;
   const child = spawn(bootCommand, {
     shell: true,
     cwd: vaultPath,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      DSH_HOME: vaultHome(vaultPath),
-    },
+    env,
   });
   let log = "";
   const collect = (d: Buffer | string) => {
@@ -1175,11 +1486,18 @@ class InstanceManager {
       mark("复用探测（未命中，清理重建）");
     }
 
-    // 2. 前置检查：Node.js（npx 依赖）
+    // 2. 前置检查 Node.js（npx 依赖）：PATH 优先；失败再按绝对路径扫常见位置
+    //    （救"装了但 Obsidian 没重启 → PATH 是旧快照"与"安装器没写 PATH"两类误报）
+    let nodeBinDir: string | null = null;
+    let nodeVia = "PATH";
     if (!(await probeNode())) {
-      throw new BootError("未检测到 Node.js（DSH 依赖它运行）", true);
+      nodeBinDir = findNodeInstallDir();
+      if (!nodeBinDir) {
+        throw new BootError("未检测到 Node.js（DSH 依赖它运行）", true);
+      }
+      nodeVia = `绝对路径兜底（${nodeBinDir}）`;
     }
-    mark("Node 检测");
+    mark(`Node 检测（${nodeVia}）`);
 
     // 3. 分配空闲端口：从确定性候选开始往上找
     let port = this.vaultPort(vaultPath);
@@ -1190,7 +1508,7 @@ class InstanceManager {
     mark("端口分配");
 
     // 4. 准备库专属数据目录（种入库根工作区），启动 + 等待就绪
-    const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port);
+    const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port, nodeBinDir);
     const dshHome = vaultHome(vaultPath);
     if (needsAuthVersion(version)) {
       const backupDir = settings.backupDir.trim() || join(dshHome, "backups");
@@ -1203,7 +1521,7 @@ class InstanceManager {
         ? `正在下载安装 dsh 内核（首次在线安装，约需 1-5 分钟）...`
         : `正在启动 @ ${port} ...`
     );
-    const child = spawnDsh(bootCommand, vaultPath);
+    const child = spawnDsh(bootCommand, vaultPath, nodeBinDir);
     const pid = child?.pid;
     mark("进程拉起");
     const getLog = () =>
@@ -1426,13 +1744,33 @@ class DshView extends ItemView {
       const message = error instanceof Error ? error.message : String(error);
       status.setText(`启动失败：${message}`);
       if (error instanceof BootError && error.nodeMissing) {
-        const link = status.createEl("a", {
-          text: "下载 Node.js（nodejs.org/zh-cn）",
-          href: "https://nodejs.org/zh-cn",
+        status.createDiv({
+          text: "检测到本机没有 Node.js。DSH 依赖它运行——可以一键安装（免管理员权限、不改动系统），也可以自己装官方版本。",
         });
+        const progress = status.createDiv();
+        const btn = status.createEl("button", { text: "一键安装 Node.js（约 30MB）" });
+        btn.onclick = () => {
+          btn.disabled = true;
+          progress.setText("准备中 ...");
+          void installNodePortable((s) => progress.setText(s)).then((err) => {
+            if (err === null) {
+              // 安装成功：重新走一遍启动流程（这次探测会命中便携 Node）
+              progress.setText("Node 就绪，正在启动 DSH ...");
+              void this.loadPanel();
+              return;
+            }
+            btn.disabled = false;
+            btn.setText("重试一键安装");
+            progress.setText(`一键安装失败：${err}`);
+            manual.show();
+          });
+        };
+        const manual = status.createDiv({ text: "手动安装：下载并运行 LTS 安装器 " });
+        const link = manual.createEl("a", { text: "nodejs.org/zh-cn", href: "https://nodejs.org/zh-cn" });
         link.setAttr("target", "_blank");
         link.setAttr("rel", "noopener");
-        status.createDiv({ text: "安装后重新打开面板即可。" });
+        manual.createDiv({ text: "安装完成后需完全重启 Obsidian（否则新 PATH 不生效）；若一键安装失败也请务必重启后再试。" });
+        manual.hide();
       }
       this.plugin.updateStatusBar("启动失败");
       new Notice(`DSH 启动失败：${message}`, 10000);
