@@ -7370,7 +7370,7 @@ var import_http = require("http");
 var import_os = require("os");
 var import_path = require("path");
 var import_yaml = __toESM(require_dist());
-var BRIDGE_SOURCE = `(function(){if(window.__dshBridgeFill)return;var BRIDGE_LINE_RE=/\\[\\s*BRIDGES is delivering packages for you\u2026\u2026\\s*\xB7\\s*(\\d+)\\s*words\\s*\xB7\\s*L(\\d+):(\\d+)-L(\\d+):(\\d+)\\s*\xB7\\s*([^\\]]+?)\\s*\xB7\\s*\\]/;function mergeFill(e,i){if(!e)e='';var a=e.split('\\n'),p=false,r='',x;for(x=0;x<a.length;x++){var l=a[x];if(BRIDGE_LINE_RE.test(l))continue;var empty=l.trim()==='';if(empty&&p)continue;r=r===''?l:r+'\\n'+l;p=empty}r=r.replace(/^\\s+|\\s+$/g,'');if(i==='')return r;return r===''?i:i+'\\n'+r}function pick(){var el=document.querySelector('textarea[data-phase]')||document.querySelector('textarea');if(el)return el.readOnly||el.disabled?null:el;var eds=document.querySelectorAll('[contenteditable="true"]');for(var i=0;i<eds.length;i++){var ce=eds[i];if(ce.isContentEditable&&!ce.disabled&&ce.offsetParent!==null)return ce}return null}function isField(el){return el.tagName==='TEXTAREA'||el.tagName==='INPUT'}function fieldSet(el,val){var p=el.tagName==='INPUT'?window.HTMLInputElement.prototype:window.HTMLTextAreaElement.prototype;var d=Object.getOwnPropertyDescriptor(p,'value');d.set.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}))}function editSet(el,val){try{el.focus();var sel=window.getSelection();var rng=document.createRange();rng.selectNodeContents(el);sel.removeAllRanges();sel.addRange(rng);var ok=false;try{ok=document.execCommand('insertText',false,val)}catch(_){}if(!ok)throw new Error('insertText unavailable')}catch(_){el.textContent=val;el.dispatchEvent(new Event('input',{bubbles:true}))}}function fill(text){var n=0;function go(){var el=pick();if(el){var cur=isField(el)?el.value||'':el.textContent||'';var merged=mergeFill(cur,text);if(isField(el)){fieldSet(el,merged)}else{editSet(el,merged)}return}if(n<30){n++;setTimeout(go,n<10?150:500)}}go()}var kbdList=[];function kbdCombo(e){var k=e.key||'';if(k==='Control'||k==='Alt'||k==='Shift'||k==='Meta')return '';var p=[];if(e.ctrlKey)p.push('ctrl');if(e.altKey)p.push('alt');if(e.shiftKey)p.push('shift');if(e.metaKey)p.push('meta');if(!p.length)return '';p.push(k.toLowerCase());return p.join('+')}window.__dshKbdCfg=function(keys){kbdList=Array.isArray(keys)?keys.slice():[];void 0};document.addEventListener('keydown',function(e){var c=kbdCombo(e);if(c&&kbdList.indexOf(c)>=0){e.preventDefault();e.stopPropagation();try{console.log('__DSHKBD__'+c)}catch(_){}}},true);window.__dshBridgeFill=fill;})();`;
+var BRIDGE_SOURCE = `(function(){if(window.__dshBridgeFill)return;var BRIDGE_LINE_RE=/\\[\\s*BRIDGES is delivering packages for you\u2026\u2026\\s*\xB7\\s*(\\d+)\\s*words\\s*\xB7\\s*L(\\d+):(\\d+)-L(\\d+):(\\d+)\\s*\xB7\\s*([^\\]]+?)\\s*\xB7\\s*\\]/;function mergeFill(e,i){if(!e)e='';var a=e.split('\\n'),p=false,r='',x;for(x=0;x<a.length;x++){var l=a[x];if(BRIDGE_LINE_RE.test(l))continue;var empty=l.trim()==='';if(empty&&p)continue;r=r===''?l:r+'\\n'+l;p=empty}r=r.replace(/^\\s+|\\s+$/g,'');if(i==='')return r;return r===''?i:i+'\\n'+r}function pick(){var el=document.querySelector('textarea[data-phase]')||document.querySelector('textarea');if(el)return el.readOnly||el.disabled?null:el;var eds=document.querySelectorAll('[contenteditable="true"]');for(var i=0;i<eds.length;i++){var ce=eds[i];if(ce.isContentEditable&&!ce.disabled&&ce.offsetParent!==null)return ce}return null}function isField(el){return el.tagName==='TEXTAREA'||el.tagName==='INPUT'}function fieldSet(el,val){var p=el.tagName==='INPUT'?window.HTMLInputElement.prototype:window.HTMLTextAreaElement.prototype;var d=Object.getOwnPropertyDescriptor(p,'value');d.set.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}))}function editSet(el,val){try{el.focus();var sel=window.getSelection();var rng=document.createRange();rng.selectNodeContents(el);sel.removeAllRanges();sel.addRange(rng);var ok=false;try{ok=document.execCommand('insertText',false,val)}catch(_){}if(!ok)throw new Error('insertText unavailable')}catch(_){el.textContent=val;el.dispatchEvent(new Event('input',{bubbles:true}))}}function fill(text){var n=0;function go(){var el=pick();if(el){var cur=isField(el)?el.value||'':el.textContent||'';var merged=mergeFill(cur,text);if(isField(el)){fieldSet(el,merged)}else{editSet(el,merged)}return}if(n<30){n++;setTimeout(go,n<10?150:500)}}go()}var kbdList=[];function kbdCombo(e){var k=e.key||'';if(k==='Control'||k==='Alt'||k==='Shift'||k==='Meta')return '';var p=[];if(e.ctrlKey)p.push('ctrl');if(e.altKey)p.push('alt');if(e.shiftKey)p.push('shift');if(e.metaKey)p.push('meta');if(!p.length)return '';p.push(k.toLowerCase());return p.join('+')}window.__dshKbdCfg=function(keys){kbdList=Array.isArray(keys)?keys.slice():[];void 0};document.addEventListener('keydown',function(e){var c=kbdCombo(e);if(c&&kbdList.indexOf(c)>=0){e.preventDefault();e.stopPropagation();try{console.log('__DSHKBD__'+c)}catch(_){}}},true);var vaultRoot=null;var openOn=false;function normP(p){return p.replace(/\\\\/g,'/').replace(/\\/+/g,'/')}function coll(p){var m=/^[A-Za-z]:/.exec(p),drive=m?m[0]:'',body=p.slice(drive.length),rooted=body.charAt(0)==='/',segs=[],i,parts=body.split('/');for(i=0;i<parts.length;i++){var s=parts[i];if(s===''||s==='.')continue;if(s==='..'){if(segs.length)segs.pop()}else{segs.push(s)}}return drive+(rooted?'/':'')+segs.join('/')}function resolveTxt(text){var t=text.trim();if(!t||t.length>300||!vaultRoot)return null;var r=normP(vaultRoot).replace(/\\/+$/,'');var abs=/^[A-Za-z]:/.test(t)||t.charAt(0)==='/'?normP(t):r+'/'+normP(t);var a=coll(abs);var rl=r.toLowerCase(),al=a.toLowerCase();if(al===rl||al.indexOf(rl+'/')===0)return a;return null}function isClickable(el){return el.tagName==='BUTTON'||el.tagName==='A'}function labelPrefixed(t){return /^(read|edit|write|think|grep|pwsh|tool|search|diff|web|bash|python|node|run|open|show|copy|cat|mkdir|rm|mv|add|delete)\\b/i.test(t)}function readable(p){return /\\.(md|markdown|txt|canvas|pdf|png|jpe?g|gif|svg|webp|bmp|ico|mp3|wav|ogg|oga|m4a|flac|opus|aac|mp4|webm|mov|mkv|avi|m4v|ogv|3gp|ts|js|jsx|tsx|mjs|cjs|json|css|scss|less|html|htm|xml|yaml|yml|csv|log|mdx|py|sh|bat|ps1)$/i.test(p)}function pathOf(el){var t=el.getAttribute?el.getAttribute('title'):null;if(t&&/[\\\\/]/.test(t))return t;return (el.textContent||'').trim()}window.__dshOpenCfg=function(cfg){if(cfg&&typeof cfg.root==='string'){vaultRoot=cfg.root;openOn=!!cfg.enabled}else{vaultRoot=null;openOn=false}};document.addEventListener('click',function(e){if(!openOn||!vaultRoot)return;var el=e.target;while(el&&el!==document.body){var txt=pathOf(el);if(txt.length>2&&txt.length<300&&/[\\\\/]/.test(txt)&&isClickable(el)&&!labelPrefixed(txt)){e.preventDefault();e.stopPropagation();var r=resolveTxt(txt);if(r&&readable(r)){try{console.log('__DSHOPEN__'+encodeURIComponent(r))}catch(_){}}return}el=el.parentElement}},true);window.__dshBridgeFill=fill;})();`;
 function hotkeyToCombo(hk) {
   if (!hk || typeof hk.key !== "string" || hk.key === "") return null;
   let ctrl = false;
@@ -7406,6 +7406,7 @@ var DEFAULT_SETTINGS = {
   lastUpdateCheck: 0,
   backupDir: "",
   shortcutPassthrough: true,
+  reverseBridge: true,
   bottomPadding: 28
 };
 function bootTotal(tb) {
@@ -8230,12 +8231,16 @@ var DshView = class extends import_obsidian.ItemView {
       }
     );
   }
-  /** 把当前 Obsidian 快捷键组合集合下发给 webview 桥接（开关键变化时也会重推）。 */
-  pushKbdConfig() {
+  /** 把快捷键透传集合 + 反向桥接配置（库根路径/开关）下发给 webview 桥接。 */
+  pushBridgeConfig() {
     const wv = this.wvEl;
     if (!wv) return;
     const keys = this.plugin.buildPassthroughCombos();
-    const code = "if(window.__dshKbdCfg){window.__dshKbdCfg(" + JSON.stringify(keys) + ");}void 0";
+    const openCfg = JSON.stringify({
+      root: this.hostPath,
+      enabled: this.plugin.settings.reverseBridge
+    });
+    const code = "if(window.__dshKbdCfg){window.__dshKbdCfg(" + JSON.stringify(keys) + ");}if(window.__dshOpenCfg){window.__dshOpenCfg(" + openCfg + ");}void 0";
     void wv.executeJavaScript(code).catch(() => {
     });
   }
@@ -8243,10 +8248,41 @@ var DshView = class extends import_obsidian.ItemView {
   applyBottomPadding(px) {
     this.contentEl.style.setProperty("--dsh-pad-bottom", `${px}px`);
   }
+  /**
+   * 反向桥接收口：guest 已限定「库内 + 可读扩展」，宿主再复核一次库内归属后打开。
+   * 已在某标签页打开 → 直接聚焦；否则新开标签页。找不到（删除/改名）→ Notice。
+   */
+  openVaultPath(absPath) {
+    const norm = (p) => p.replace(/\\/g, "/").replace(/\/+/g, "/");
+    const rn = norm(this.hostPath).replace(/\/+$/, "");
+    const an = norm(absPath);
+    if (!rn || an.toLowerCase() !== rn.toLowerCase() && !an.toLowerCase().startsWith(rn.toLowerCase() + "/")) {
+      return;
+    }
+    const rel = an.slice(rn.length).replace(/^\/+/, "");
+    let af = this.app.vault.getAbstractFileByPath(rel);
+    if (!af) {
+      const lower = rel.toLowerCase();
+      af = this.app.vault.getFiles().find((f) => f.path.toLowerCase() === lower) ?? null;
+    }
+    if (!(af instanceof import_obsidian.TFile)) {
+      new import_obsidian.Notice(`\u5E93\u5185\u672A\u627E\u5230\u6587\u4EF6\uFF1A${rel}`);
+      return;
+    }
+    const { workspace } = this.app;
+    for (const leaf of workspace.getLeavesOfType("markdown")) {
+      const file = leaf.view.file;
+      if (file && file.path === af.path) {
+        workspace.setActiveLeaf(leaf);
+        return;
+      }
+    }
+    void workspace.getLeaf("tab").openFile(af);
+  }
   async onOpen() {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf && leaf.view === this) this.pushKbdConfig();
+        if (leaf && leaf.view === this) this.pushBridgeConfig();
       })
     );
     this.contentEl.empty();
@@ -8318,6 +8354,11 @@ var DshView = class extends import_obsidian.ItemView {
         const msg = typeof ev.message === "string" ? ev.message : typeof ev.detail?.message === "string" ? ev.detail.message : "";
         if (msg.startsWith("__DSHKBD__")) {
           this.plugin.runHotkeyCombo(msg.slice("__DSHKBD__".length));
+        } else if (msg.startsWith("__DSHOPEN__")) {
+          try {
+            this.openVaultPath(decodeURIComponent(msg.slice("__DSHOPEN__".length)));
+          } catch {
+          }
         }
       });
       wv.addEventListener("did-finish-load", () => {
@@ -8330,7 +8371,7 @@ var DshView = class extends import_obsidian.ItemView {
           if (lb) lb.stages.push({ label: "\u9762\u677F\u52A0\u8F7D", ms: Date.now() - navStart });
         }
         const wvt = wv;
-        void wvt.executeJavaScript(BRIDGE_SOURCE).then(() => this.pushKbdConfig()).catch(() => {
+        void wvt.executeJavaScript(BRIDGE_SOURCE).then(() => this.pushBridgeConfig()).catch(() => {
         });
       });
       wv.addEventListener("did-fail-load", (e) => {
@@ -8501,9 +8542,9 @@ var DshPlugin = class extends import_obsidian.Plugin {
     }
   }
   // #endregion
-  /** 快捷键透传开关变化后，向已打开的面板重推配置。 */
-  refreshKbdConfig() {
-    this.dshView()?.pushKbdConfig();
+  /** 快捷键透传 / 反向桥接开关变化后，向已打开的面板重推配置。 */
+  refreshBridgeConfig() {
+    this.dshView()?.pushBridgeConfig();
   }
   /** 底部留白滑杆变化后，即时应用到已打开的面板。 */
   refreshBottomPadding() {
@@ -8660,7 +8701,14 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
       (toggle) => toggle.setValue(this.plugin.settings.shortcutPassthrough).onChange(async (value) => {
         this.plugin.settings.shortcutPassthrough = value;
         await this.plugin.saveSettings();
-        this.plugin.refreshKbdConfig();
+        this.plugin.refreshBridgeConfig();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("\u53CD\u5411\u6865\u63A5").setDesc("\u5F00\u542F\u540E\uFF0C\u5728 DSH \u804A\u5929\u91CC\u70B9\u51FB\u5B83\u663E\u793A\u7684\u672C\u5E93\u5185\u6587\u4EF6\u8DEF\u5F84\uFF0C\u4F1A\u76F4\u63A5\u8DF3\u8F6C\u5230 Obsidian \u5BF9\u5E94\u7B14\u8BB0\uFF08\u5DF2\u6253\u5F00\u5219\u805A\u7126\uFF0C\u5426\u5219\u65B0\u6807\u7B7E\u9875\u6253\u5F00\uFF09\u3002").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.reverseBridge).onChange(async (value) => {
+        this.plugin.settings.reverseBridge = value;
+        await this.plugin.saveSettings();
+        this.plugin.refreshBridgeConfig();
       })
     );
     new import_obsidian.Setting(containerEl).setName("\u9762\u677F\u4F4D\u7F6E").setDesc("DSH \u9762\u677F\u663E\u793A\u7684\u4F4D\u7F6E\u3002").addDropdown(

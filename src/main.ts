@@ -8,6 +8,7 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  TFile,
   WorkspaceLeaf,
 } from "obsidian";
 import { execFileSync, spawn, type ChildProcess } from "child_process";
@@ -38,6 +39,25 @@ const BRIDGE_SOURCE =
   "function kbdCombo(e){var k=e.key||'';if(k==='Control'||k==='Alt'||k==='Shift'||k==='Meta')return '';var p=[];if(e.ctrlKey)p.push('ctrl');if(e.altKey)p.push('alt');if(e.shiftKey)p.push('shift');if(e.metaKey)p.push('meta');if(!p.length)return '';p.push(k.toLowerCase());return p.join('+')}" +
   "window.__dshKbdCfg=function(keys){kbdList=Array.isArray(keys)?keys.slice():[];void 0};" +
   "document.addEventListener('keydown',function(e){var c=kbdCombo(e);if(c&&kbdList.indexOf(c)>=0){e.preventDefault();e.stopPropagation();try{console.log('__DSHKBD__'+c)}catch(_){}}},true);" +
+  "var vaultRoot=null;var openOn=false;" +
+  "function normP(p){return p.replace(/\\\\/g,'/').replace(/\\/+/g,'/')}" +
+  "function coll(p){var m=/^[A-Za-z]:/.exec(p),drive=m?m[0]:'',body=p.slice(drive.length),rooted=body.charAt(0)==='/',segs=[],i,parts=body.split('/');" +
+  "for(i=0;i<parts.length;i++){var s=parts[i];if(s===''||s==='.')continue;if(s==='..'){if(segs.length)segs.pop()}else{segs.push(s)}}" +
+  "return drive+(rooted?'/':'')+segs.join('/')}" +
+  "function resolveTxt(text){var t=text.trim();if(!t||t.length>300||!vaultRoot)return null;" +
+  "var r=normP(vaultRoot).replace(/\\/+$/,'');var abs=/^[A-Za-z]:/.test(t)||t.charAt(0)==='/'?normP(t):r+'/'+normP(t);var a=coll(abs);" +
+  "var rl=r.toLowerCase(),al=a.toLowerCase();if(al===rl||al.indexOf(rl+'/')===0)return a;return null}" +
+  "function isClickable(el){return el.tagName==='BUTTON'||el.tagName==='A'}" +
+  "function labelPrefixed(t){return /^(read|edit|write|think|grep|pwsh|tool|search|diff|web|bash|python|node|run|open|show|copy|cat|mkdir|rm|mv|add|delete)\\b/i.test(t)}" +
+  "function readable(p){return /\\.(md|markdown|txt|canvas|pdf|png|jpe?g|gif|svg|webp|bmp|ico|mp3|wav|ogg|oga|m4a|flac|opus|aac|mp4|webm|mov|mkv|avi|m4v|ogv|3gp|ts|js|jsx|tsx|mjs|cjs|json|css|scss|less|html|htm|xml|yaml|yml|csv|log|mdx|py|sh|bat|ps1)$/i.test(p)}" +
+  "function pathOf(el){var t=el.getAttribute?el.getAttribute('title'):null;if(t&&/[\\\\/]/.test(t))return t;return (el.textContent||'').trim()}" +
+  "window.__dshOpenCfg=function(cfg){if(cfg&&typeof cfg.root==='string'){vaultRoot=cfg.root;openOn=!!cfg.enabled}else{vaultRoot=null;openOn=false}};" +
+  "document.addEventListener('click',function(e){if(!openOn||!vaultRoot)return;var el=e.target;" +
+  "while(el&&el!==document.body){var txt=pathOf(el);" +
+  "if(txt.length>2&&txt.length<300&&/[\\\\/]/.test(txt)&&isClickable(el)&&!labelPrefixed(txt)){" +
+  "e.preventDefault();e.stopPropagation();var r=resolveTxt(txt);" +
+  "if(r&&readable(r)){try{console.log('__DSHOPEN__'+encodeURIComponent(r))}catch(_){}}" +
+  "return}el=el.parentElement}},true);" +
   "window.__dshBridgeFill=fill;" +
   "})();";
 
@@ -114,6 +134,8 @@ interface DshSettings {
   backupDir: string;
   /** 焦点在 DSH 面板时透传 Obsidian 快捷键（Ctrl+P/Ctrl+O 等） */
   shortcutPassthrough: boolean;
+  /** 反向桥接：点击 DSH 里显示的库内文件路径 → 在 Obsidian 中打开 */
+  reverseBridge: boolean;
   /** 面板底部留白（px，0-30）：状态栏遮挡底部内容时垫高 */
   bottomPadding: number;
 }
@@ -128,6 +150,7 @@ const DEFAULT_SETTINGS: DshSettings = {
   lastUpdateCheck: 0,
   backupDir: "",
   shortcutPassthrough: true,
+  reverseBridge: true,
   bottomPadding: 28,
 };
 
@@ -1314,13 +1337,18 @@ class DshView extends ItemView {
     );
   }
 
-  /** 把当前 Obsidian 快捷键组合集合下发给 webview 桥接（开关键变化时也会重推）。 */
-  pushKbdConfig(): void {
+  /** 把快捷键透传集合 + 反向桥接配置（库根路径/开关）下发给 webview 桥接。 */
+  pushBridgeConfig(): void {
     const wv = this.wvEl as unknown as WebviewLike | null;
     if (!wv) return;
     const keys = this.plugin.buildPassthroughCombos();
+    const openCfg = JSON.stringify({
+      root: this.hostPath,
+      enabled: this.plugin.settings.reverseBridge,
+    });
     const code =
-      "if(window.__dshKbdCfg){window.__dshKbdCfg(" + JSON.stringify(keys) + ");}void 0";
+      "if(window.__dshKbdCfg){window.__dshKbdCfg(" + JSON.stringify(keys) + ");}" +
+      "if(window.__dshOpenCfg){window.__dshOpenCfg(" + openCfg + ");}void 0";
     void wv.executeJavaScript(code).catch(() => {
       /* webview 尚未加载完：did-finish-load 注入成功后会再推 */
     });
@@ -1330,11 +1358,44 @@ class DshView extends ItemView {
   applyBottomPadding(px: number): void {
     this.contentEl.style.setProperty("--dsh-pad-bottom", `${px}px`);
   }
+
+  /**
+   * 反向桥接收口：guest 已限定「库内 + 可读扩展」，宿主再复核一次库内归属后打开。
+   * 已在某标签页打开 → 直接聚焦；否则新开标签页。找不到（删除/改名）→ Notice。
+   */
+  private openVaultPath(absPath: string): void {
+    const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+/g, "/");
+    const rn = norm(this.hostPath).replace(/\/+$/, "");
+    const an = norm(absPath);
+    if (!rn || (an.toLowerCase() !== rn.toLowerCase() && !an.toLowerCase().startsWith(rn.toLowerCase() + "/"))) {
+      return; // 库外路径：不拦截打开（guest 判定后仍到达这里的兜底）
+    }
+    const rel = an.slice(rn.length).replace(/^\/+/, "");
+    let af = this.app.vault.getAbstractFileByPath(rel);
+    if (!af) {
+      // 模型输出的路径大小写可能与磁盘不一致：不区分大小写兜底扫描
+      const lower = rel.toLowerCase();
+      af = this.app.vault.getFiles().find((f) => f.path.toLowerCase() === lower) ?? null;
+    }
+    if (!(af instanceof TFile)) {
+      new Notice(`库内未找到文件：${rel}`);
+      return;
+    }
+    const { workspace } = this.app;
+    for (const leaf of workspace.getLeavesOfType("markdown")) {
+      const file = (leaf.view as MarkdownView).file;
+      if (file && file.path === af.path) {
+        workspace.setActiveLeaf(leaf);
+        return;
+      }
+    }
+    void workspace.getLeaf("tab").openFile(af);
+  }
   async onOpen(): Promise<void> {
-    // 面板每次被激活时重推快捷键配置：用户在 Obsidian 里改快捷键后无需重开面板
+    // 面板每次被激活时重推桥接配置：用户在 Obsidian 里改快捷键后无需重开面板
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (leaf && leaf.view === this) this.pushKbdConfig();
+        if (leaf && leaf.view === this) this.pushBridgeConfig();
       })
     );
     this.contentEl.empty();
@@ -1410,7 +1471,7 @@ class DshView extends ItemView {
       wv.setAttribute("partition", `persist:dsh-${hashPath(vaultPath).toString(16)}`);
       // 底部留白：CSS 变量写在容器上（.dsh-frame 高度与 .dsh-view::after 留白条共同消费，滑杆实时生效）
       this.contentEl.style.setProperty("--dsh-pad-bottom", `${this.plugin.settings.bottomPadding}px`);
-      // guest→host 带外通道：桥接命中透传快捷键时 console.log('__DSHKBD__'+combo)，此处捕获执行
+      // guest→host 带外通道：桥接命中透传快捷键 / 拦截库内路径点击时，用 console.log 前缀消息回传
       wv.addEventListener("console-message", (e) => {
         const ev = e as unknown as { message?: string; detail?: { message?: string } };
         const msg =
@@ -1421,6 +1482,12 @@ class DshView extends ItemView {
               : "";
         if (msg.startsWith("__DSHKBD__")) {
           this.plugin.runHotkeyCombo(msg.slice("__DSHKBD__".length));
+        } else if (msg.startsWith("__DSHOPEN__")) {
+          try {
+            this.openVaultPath(decodeURIComponent(msg.slice("__DSHOPEN__".length)));
+          } catch {
+            /* 载荷异常：忽略 */
+          }
         }
       });
       wv.addEventListener("did-finish-load", () => {
@@ -1438,7 +1505,7 @@ class DshView extends ItemView {
         const wvt = wv as unknown as WebviewLike;
         void wvt
           .executeJavaScript(BRIDGE_SOURCE)
-          .then(() => this.pushKbdConfig())
+          .then(() => this.pushBridgeConfig())
           .catch(() => {
             /* 注入失败（界面尚未就绪）不阻断面板 */
           });
@@ -1663,9 +1730,9 @@ export default class DshPlugin extends Plugin {
 
   // #endregion
 
-  /** 快捷键透传开关变化后，向已打开的面板重推配置。 */
-  refreshKbdConfig(): void {
-    this.dshView()?.pushKbdConfig();
+  /** 快捷键透传 / 反向桥接开关变化后，向已打开的面板重推配置。 */
+  refreshBridgeConfig(): void {
+    this.dshView()?.pushBridgeConfig();
   }
 
   /** 底部留白滑杆变化后，即时应用到已打开的面板。 */
@@ -1886,7 +1953,18 @@ class DshSettingTab extends PluginSettingTab {
         toggle.setValue(this.plugin.settings.shortcutPassthrough).onChange(async (value) => {
           this.plugin.settings.shortcutPassthrough = value;
           await this.plugin.saveSettings();
-          this.plugin.refreshKbdConfig();
+          this.plugin.refreshBridgeConfig();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("反向桥接")
+      .setDesc("开启后，在 DSH 聊天里点击它显示的本库内文件路径，会直接跳转到 Obsidian 对应笔记（已打开则聚焦，否则新标签页打开）。")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.reverseBridge).onChange(async (value) => {
+          this.plugin.settings.reverseBridge = value;
+          await this.plugin.saveSettings();
+          this.plugin.refreshBridgeConfig();
         })
       );
 
