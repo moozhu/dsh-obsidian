@@ -47,3 +47,43 @@
   white-space: pre-wrap;
   user-select: text;
 }
+
+/* 增量同步冲突裁定弹框 */
+.dsh-conflict-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dsh-conflict-key {
+  flex: 1;
+  font-weight: 600;
+}
+
+.dsh-conflict-btns {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.dsh-conflict-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+/* 「同步模型配置」的独立说明区（渲染在设置行下方，整幅小字灰色） */
+.dsh-sync-desc {
+  margin: -10px 0 18px 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+}
+
+.dsh-sync-desc div {
+  margin: 2px 0;
+}

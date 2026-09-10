@@ -4,6 +4,7 @@ import {
   FileSystemAdapter,
   ItemView,
   MarkdownView,
+  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -13,7 +14,7 @@ import {
 } from "obsidian";
 import { execFileSync, spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
-import { copyFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { get } from "http";
 import { get as httpsGet } from "https";
 import { homedir } from "os";
@@ -56,9 +57,8 @@ const BRIDGE_SOURCE =
   "document.addEventListener('click',function(e){if(!openOn||!vaultRoot)return;var el=e.target;" +
   "while(el&&el!==document.body){var txt=pathOf(el);" +
   "if(txt.length>2&&txt.length<300&&/[\\\\/]/.test(txt)&&isClickable(el)&&!labelPrefixed(txt)){" +
-  "e.preventDefault();e.stopPropagation();var r=resolveTxt(txt);" +
-  "if(r&&readable(r)){try{console.log('__DSHOPEN__'+encodeURIComponent(r))}catch(_){}}" +
-  "return}el=el.parentElement}},true);" +
+  "var r=resolveTxt(txt);" +
+  "if(r&&readable(r)){e.preventDefault();e.stopPropagation();try{console.log('__DSHOPEN__'+encodeURIComponent(r))}catch(_){}return}}el=el.parentElement}},true);" +
   "window.__dshBridgeFill=fill;" +
   "})();";
 
@@ -139,6 +139,8 @@ interface DshSettings {
   reverseBridge: boolean;
   /** 面板底部留白（px，0-30）：状态栏遮挡底部内容时垫高 */
   bottomPadding: number;
+  /** 首次引导「同步模型配置」提示是否已弹过（弹过一次永不再扰） */
+  configHintShown: boolean;
 }
 
 const DEFAULT_SETTINGS: DshSettings = {
@@ -153,6 +155,7 @@ const DEFAULT_SETTINGS: DshSettings = {
   shortcutPassthrough: true,
   reverseBridge: true,
   bottomPadding: 28,
+  configHintShown: false,
 };
 
 /** 启动诊断：单个阶段耗时（毫秒）。 */
@@ -838,153 +841,386 @@ function vaultHome(vaultPath: string): string {
 }
 
 /**
- * 从主 .dsh 单向同步"模型基础设施"配置到库专属目录。
+ * 模型配置拷贝引擎（0.5.0 起：扁平实例模型——无状态、用户主动发起）。
  *
- * 设计取舍（为什么单向、只同步模型供应商与凭据）：
- * - 只同步"基础设施"：模型供应商（LLM provider 路由：baseURL、模型列表、兼容配置等）
- *   和 API 凭据。这些是配置一次就该处处可用的东西——在主实例（如桌面版 3080）
- *   添加一个供应商 / API key 后，各库的 DSH 也能直接用，不必每个库重复配置。
- * - **不同步默认模型路由（agent-default-model）与搜索模型（web-search-deepseek）**：
- *   每个库想用哪个模型作为默认（如主实例用 deepseek、某库用 gpt/mimo）是库自己的
- *   选择，不应被主实例覆盖。
- * - 对 provider 这类字典采用"合并（union）"而非"整体替换"：主实例有、库没有的
- *   会被补进来；库实例单独添加的 provider/凭据予以保留；同名项以主为准覆盖。
- *   这样既同步了新增，又不会误删任一实例里特有的配置。
- * - 方向固定为 主 → 库 单向：主实例是模型配置的权威源。库实例里的模型改动
- *   不会回写主实例（避免多端互相覆盖造成混乱；这一取舍写入 README）。
- * - 插件体系（profiles 目录）不在此同步范围内：不同库想用不同插件时互不干扰。
- *
- * 该函数在每次启动实例前调用，因此在主实例新增供应商/密钥后，重启/重开任一库面板即可同步。
+ * 设计定稿：
+ * - 主实例（官方 DSH，~/.dsh 或 DSH_HOME）与各库实例是平级关系：插件不做任何
+ *   自动同步，一切配置拷贝由用户在「设置 → 同步模型配置」主动发起，来源可以是
+ *   主实例，也可以是本机任一其它库；
+ * - 同步范围只有「模型基础设施」：供应商命名空间（llm-pi-ai / llm-deepseek）与
+ *   凭据 refs（API key）。records（如 browser-session）是每个实例自己的登录
+ *   票据，永不拷贝；每库默认模型路由（agent-default-model）等库内选择不在范围；
+ * - 增量（默认）：只补缺——来源有、本库没有的直接拷入；同名且值不同 = 冲突，
+ *   弹框逐项「用来源 / 留本库」（默认留本库，取消/ESC 则整体不写盘）；本库独有条目保留；
+ * - 覆盖：本库供应商命名空间与凭据 refs 整体替换为来源版（来源没有的删除——
+ *   即「幽灵供应商/密钥清扫」），写盘前备份 .bak-<时间戳>；records 不动；
+ * - 无基线、无持续链路：拷贝完成后各库独立演化，不存在「删了又回来」的问题。
  */
-function syncModelConfig(vaultHomePath: string): void {
-  const mainHome = process.env.DSH_HOME ?? join(homedir(), ".dsh");
-  mkdirSync(vaultHomePath, { recursive: true });
+const MODEL_NAMESPACES = ["llm-pi-ai", "llm-deepseek"] as const;
 
-  // 1) 凭据：并集合并（主新增的 key 补进库，库独有的 key 保留，同名以主覆盖）。
-  const mainCred = join(mainHome, ".credentials.yaml");
-  const vaultCred = join(vaultHomePath, ".credentials.yaml");
-  if (existsSync(mainCred)) {
-    try {
-      const mergedCred = mergeYamlFile(mainCred, vaultCred);
-      // dsh 凭据只认 version / refs / records 三个顶层键；
-      // 老式扁平键（如 DEEPSEEK_API_KEY）会导致 vault 实例启动崩溃，必须剔除。
-      const sanitized = sanitizeCredentialKeys(mergedCred);
-      writeFileSync(vaultCred, sanitized, "utf8");
-    } catch {
-      // 凭证同步失败不阻塞启动，用户可在库实例里手动配置
-    }
+/** 「同步模型配置」下拉框里可选的一个配置来源。 */
+interface ConfigSource {
+  id: string;
+  label: string;
+  homePath: string;
+}
+
+/** 增量模式下的冲突项：来源与本库同名不同值，需用户逐项裁定。 */
+interface ConfigConflict {
+  target: "settings" | "credentials";
+  key: string;
+  setPath: string[];
+  value: unknown;
+}
+
+function plainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** 与键序无关的深度 JSON 序列化（不同文件写出的 YAML 键序不同，不能直接 stringify 比较）。 */
+function stableJson(v: unknown): string {
+  if (plainObject(v)) {
+    return "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + stableJson(v[k])).join(",") + "}";
   }
+  if (Array.isArray(v)) return "[" + v.map((x) => stableJson(x)).join(",") + "]";
+  return JSON.stringify(v === undefined ? null : v);
+}
 
-  // 2) 设置：只把白名单内的"模型供应商"命名空间以主为准合并进库的 settings.yaml，
-  //    保留库实例里其它命名空间、独有 provider 与默认模型选择。
-  const MODEL_NAMESPACES = ["llm-pi-ai", "llm-deepseek"] as const;
+function dshMainHome(): string {
+  return process.env.DSH_HOME ?? join(homedir(), ".dsh");
+}
 
-  const mainSettings = join(mainHome, "settings.yaml");
-  const vaultSettings = join(vaultHomePath, "settings.yaml");
-  if (!existsSync(mainSettings)) return; // 主实例没有设置可同步
+function hasDshConfig(home: string): boolean {
+  return existsSync(join(home, "settings.yaml")) || existsSync(join(home, ".credentials.yaml"));
+}
 
-  let mainDoc: Document;
+/** 从库目录推断库名（无 vault.path 标记的旧版库兜底）：读 DSH 自管的工作区注册表取首个路径。 */
+function inferVaultName(home: string): string | null {
   try {
-    mainDoc = parseDocument(readFileSync(mainSettings, "utf8"));
-    if (mainDoc.errors.length > 0 || mainDoc.toJS() == null) return;
-  } catch {
-    return; // 主设置解析失败就跳过，保留库现有配置
-  }
-
-  const vaultDoc = existsSync(vaultSettings) ? parseDocument(readFileSync(vaultSettings, "utf8")) : new Document({});
-  const mainRoot = mainDoc.toJS() as Record<string, unknown> | null;
-  const vaultRoot = vaultDoc.toJS() as Record<string, unknown> | null;
-  if (mainRoot == null) return;
-
-  let changed = false;
-  for (const ns of MODEL_NAMESPACES) {
-    const mainVal = mainRoot[ns]; // 主命名空间的纯 JS 值
-    if (mainVal === undefined) continue;
-    const vaultVal = vaultRoot?.[ns];
-    const merged = mergeModelSection(vaultVal, mainVal); // 主优先覆盖，库独有保留
-    vaultDoc.setIn([ns], merged);
-    changed = true;
-  }
-  if (changed) {
-    try {
-      writeFileSync(vaultSettings, vaultDoc.toString({}), "utf8");
-    } catch {
-      // 写入失败不阻塞启动
+    const file = join(home, "storages", "workspace.json");
+    if (!existsSync(file)) return null;
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+      tables?: { workspaces?: Record<string, { path?: string }> };
+    };
+    const ws = parsed.tables?.workspaces;
+    if (!ws) return null;
+    for (const w of Object.values(ws)) {
+      if (typeof w?.path === "string" && w.path) return basename(w.path);
     }
+    return null;
+  } catch {
+    return null;
   }
 }
 
-/**
- * 合并两个 YAML 文件：以 source 为准覆盖 target，但对纯对象做逐键合并，
- * 保留 target 里 source 没有的键。source 文件不存在时返回 target 原内容；
- * target 不存在时返回 source 序列化结果。
- */
-function mergeYamlFile(sourcePath: string, targetPath: string): string {
-  const sourceDoc = parseDocument(readFileSync(sourcePath, "utf8"));
-  if (sourceDoc.errors.length > 0) {
-    // 源文件损坏则保留目标文件现状
-    return existsSync(targetPath) ? readFileSync(targetPath, "utf8") : "";
+/** 本库是否已配置过模型基础设施（任一命名空间有供应商或有凭据 ref 即算）。 */
+function vaultHasModelConfig(home: string): boolean {
+  try {
+    const root = readYamlRoot(join(home, "settings.yaml"));
+    if (root) {
+      for (const ns of MODEL_NAMESPACES) {
+        const v = root[ns];
+        if (v === undefined) continue;
+        if (!plainObject(v)) return true;
+        if (Object.keys(v).length > 0) return true;
+      }
+    }
+    const refs = readYamlRoot(join(home, ".credentials.yaml"))?.["refs"];
+    if (plainObject(refs) && Object.keys(refs).length > 0) return true;
+  } catch {
+    return true; // 文件损坏当"已配置"处理，不去打扰用户
   }
-  if (!existsSync(targetPath)) return sourceDoc.toString({});
-  const targetDoc = parseDocument(readFileSync(targetPath, "utf8"));
-  const sourceRoot = sourceDoc.toJS() as Record<string, unknown> | null;
-  const targetRoot = targetDoc.toJS() as Record<string, unknown> | null;
-  if (
-    sourceRoot !== null &&
-    typeof sourceRoot === "object" &&
-    !Array.isArray(sourceRoot) &&
-    targetRoot !== null &&
-    typeof targetRoot === "object" &&
-    !Array.isArray(targetRoot)
-  ) {
-    const merged = mergeModelSection(targetRoot, sourceRoot);
-    targetDoc.setIn([], merged);
-    return targetDoc.toString({});
-  }
-  return sourceDoc.toString({});
+  return false;
 }
 
-/**
- * 只保留 dsh 凭据允许的顶层键（version / refs / records），
- * 丢弃其它（如老式扁平 DEEPSEEK_API_KEY），避免 vault 实例启动崩溃。
- * dsh-credentials-local 的校验器（lib/index.js）只允许这三个顶层键。
- */
-function sanitizeCredentialKeys(yamlStr: string): string {
+/** 枚举本机可作为配置来源的全部 DSH 数据目录：主实例 + 其它库（排除当前库与空目录）。 */
+function listConfigSources(currentVaultPath: string): ConfigSource[] {
+  const out: ConfigSource[] = [];
+  const mainHome = dshMainHome();
+  if (hasDshConfig(mainHome)) {
+    out.push({ id: "main", label: "主实例（官方 DSH）", homePath: mainHome });
+  }
+  const baseDir = join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "dsh-obsidian");
+  let names: string[] = [];
+  try {
+    names = readdirSync(baseDir);
+  } catch {
+    names = [];
+  }
+  const currentHome = vaultHome(currentVaultPath);
+  const vaults: { id: string; homePath: string; base: string; hash6: string }[] = [];
+  for (const name of names.sort()) {
+    const home = join(baseDir, name);
+    try {
+      if (!statSync(home).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    if (home === currentHome || !hasDshConfig(home)) continue;
+    let vp = "";
+    try {
+      const marker = join(home, "vault.path");
+      if (existsSync(marker)) vp = readFileSync(marker, "utf8").trim();
+    } catch {
+      vp = "";
+    }
+    const base = vp ? basename(vp) : inferVaultName(home) ?? `未识别库 ${name.slice(0, 8)}`;
+    vaults.push({ id: `vault:${name}`, homePath: home, base, hash6: name.slice(0, 6) });
+  }
+  // 同名库（不同路径的同名片段）才追加哈希消歧；正常情况下拉框只看到简短库名
+  const counts = new Map<string, number>();
+  for (const v of vaults) counts.set(v.base, (counts.get(v.base) ?? 0) + 1);
+  for (const v of vaults) {
+    const label = (counts.get(v.base) ?? 0) > 1 ? `库 · ${v.base}（${v.hash6}）` : `库 · ${v.base}`;
+    out.push({ id: v.id, label, homePath: v.homePath });
+  }
+  return out;
+}
+
+/** 读 yaml 为纯 JS 根对象；文件缺失返回 null，解析失败抛错（由调用方转成用户提示）。 */
+function readYamlRoot(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
   let doc: Document;
   try {
-    doc = parseDocument(yamlStr);
+    doc = parseDocument(readFileSync(path, "utf8"));
   } catch {
-    return yamlStr;
+    throw new Error(`无法解析 ${basename(path)}`);
   }
-  if (doc.errors.length > 0) return yamlStr;
-  const ALLOWED = new Set(["version", "refs", "records"]);
-  const root = doc.toJS() as Record<string, unknown> | null;
-  if (root === null || typeof root !== "object" || Array.isArray(root)) return yamlStr;
-  for (const key of Object.keys(root)) {
-    if (!ALLOWED.has(key)) doc.delete(key);
-  }
-  return doc.toString({});
+  if (doc.errors.length > 0) throw new Error(`${basename(path)} 格式有误`);
+  const root = doc.toJS();
+  if (root == null) return null;
+  if (!plainObject(root)) throw new Error(`${basename(path)} 结构异常`);
+  return root;
 }
 
 /**
- * 深度合并一个模型命名空间：以 source(main) 为准覆盖 target(vault)，
- * 但对纯对象做逐键合并，保留 target 里 source 没有的键（如库独有的 provider/模型）。
- * 数组与标量整体以 source 为准替换。
+ * 执行一次模型配置拷贝（来源 home → 目标 home），返回动作摘要。
+ * askConflicts 对增量冲突列表做用户裁定；返回 null = 用户取消，本次整体不写盘。
  */
-function mergeModelSection(target: unknown, source: unknown): unknown {
-  if (isPlainObject(target) && isPlainObject(source)) {
-    const out: Record<string, unknown> = { ...target };
-    for (const [key, value] of Object.entries(source)) {
-      out[key] = mergeModelSection(out[key], value);
-    }
-    return out;
+async function copyModelConfig(
+  sourceHome: string,
+  targetHome: string,
+  mode: "incremental" | "overwrite",
+  askConflicts: (list: ConfigConflict[]) => Promise<Map<string, "source" | "local"> | null>
+): Promise<{ cancelled: boolean; summary: string[] }> {
+  const summary: string[] = [];
+  const conflicts: ConfigConflict[] = [];
+  mkdirSync(targetHome, { recursive: true });
+
+  // ---- settings.yaml：供应商命名空间 ----
+  const srcSettings = readYamlRoot(join(sourceHome, "settings.yaml")) ?? {};
+  const targetSettingsPath = join(targetHome, "settings.yaml");
+  let targetDoc: Document;
+  if (existsSync(targetSettingsPath)) {
+    targetDoc = parseDocument(readFileSync(targetSettingsPath, "utf8"));
+    if (targetDoc.errors.length > 0) throw new Error("本库 settings.yaml 格式有误，请先修复再同步");
+  } else {
+    targetDoc = new Document({});
   }
-  return source; // 非对象（标量/数组/缺失）整体以主为准
+  const targetRoot = (targetDoc.toJS() ?? {}) as Record<string, unknown>;
+  let settingsDirty = false;
+
+  for (const ns of MODEL_NAMESPACES) {
+    const srcVal = srcSettings[ns];
+    const tgtVal = targetRoot[ns];
+    if (srcVal === undefined) {
+      if (mode === "overwrite" && tgtVal !== undefined) {
+        targetDoc.delete(ns);
+        summary.push(`删除 ${ns}（来源没有）`);
+        settingsDirty = true;
+      }
+      continue;
+    }
+    if (mode === "overwrite") {
+      targetDoc.setIn([ns], srcVal);
+      summary.push(`覆盖 ${ns}`);
+      settingsDirty = true;
+      continue;
+    }
+    if (tgtVal === undefined) {
+      targetDoc.setIn([ns], srcVal);
+      summary.push(`新增 ${ns}`);
+      settingsDirty = true;
+      continue;
+    }
+    if (!plainObject(srcVal) || !plainObject(tgtVal)) {
+      if (stableJson(srcVal) !== stableJson(tgtVal)) {
+        conflicts.push({ target: "settings", key: `命名空间 ${ns}`, setPath: [ns], value: srcVal });
+      }
+      continue;
+    }
+    const srcProviders = srcVal["providers"];
+    const tgtProviders = tgtVal["providers"];
+    if (plainObject(srcProviders) && plainObject(tgtProviders)) {
+      // providers 下按供应商逐个合并：单个供应商整体作为裁定单位（避免半新半旧混搭）
+      for (const pid of Object.keys(srcProviders).sort()) {
+        if (tgtProviders[pid] === undefined) {
+          targetDoc.setIn([ns, "providers", pid], srcProviders[pid]);
+          summary.push(`新增供应商 ${pid}`);
+          settingsDirty = true;
+        } else if (stableJson(srcProviders[pid]) !== stableJson(tgtProviders[pid])) {
+          conflicts.push({ target: "settings", key: `供应商 ${pid}（${ns}）`, setPath: [ns, "providers", pid], value: srcProviders[pid] });
+        }
+      }
+    }
+    // 命名空间下除 providers 外的其它键逐项比较
+    for (const key of Object.keys(srcVal)) {
+      if (key === "providers" && plainObject(tgtProviders)) continue;
+      const s = srcVal[key];
+      const t = tgtVal[key];
+      if (s === undefined) continue;
+      if (t === undefined) {
+        targetDoc.setIn([ns, key], s);
+        summary.push(`新增 ${ns}.${key}`);
+        settingsDirty = true;
+      } else if (stableJson(s) !== stableJson(t)) {
+        conflicts.push({ target: "settings", key: `${ns}.${key}`, setPath: [ns, key], value: s });
+      }
+    }
+  }
+
+  // ---- .credentials.yaml：只并 refs；records 是本实例登录票据，永不拷贝 ----
+  const srcCred = readYamlRoot(join(sourceHome, ".credentials.yaml"));
+  const targetCredPath = join(targetHome, ".credentials.yaml");
+  let credDoc: Document | null = null;
+  let credDirty = false;
+  if (srcCred) {
+    if (existsSync(targetCredPath)) {
+      credDoc = parseDocument(readFileSync(targetCredPath, "utf8"));
+      if (credDoc.errors.length > 0) throw new Error("本库 .credentials.yaml 格式有误，请先修复再同步");
+    } else {
+      // 库还没有凭据文件：以来源 version 建档，records 留空（DSH 启动后自管登录会话）
+      credDoc = new Document({});
+      credDoc.setIn(["version"], srcCred["version"] ?? 1);
+      credDoc.setIn(["records"], {});
+      summary.push("新建凭据文件");
+      credDirty = true;
+    }
+    const credRoot = (credDoc.toJS() ?? {}) as Record<string, unknown>;
+    const srcRefs = plainObject(srcCred["refs"]) ? srcCred["refs"] : {};
+    const tgtRefs = plainObject(credRoot["refs"]) ? credRoot["refs"] : {};
+    if (mode === "overwrite") {
+      credDoc.setIn(["refs"], srcRefs);
+      summary.push("覆盖凭据 refs（records 保留）");
+      credDirty = true;
+    } else {
+      for (const key of Object.keys(srcRefs).sort()) {
+        if (tgtRefs[key] === undefined) {
+          credDoc.setIn(["refs", key], srcRefs[key]);
+          summary.push(`新增凭据 ${key}`);
+          credDirty = true;
+        } else if (stableJson(srcRefs[key]) !== stableJson(tgtRefs[key])) {
+          conflicts.push({ target: "credentials", key: `凭据 ${key}`, setPath: ["refs", key], value: srcRefs[key] });
+        }
+      }
+    }
+  }
+
+  // ---- 增量：统一裁定全部冲突（取消 = 什么都不写） ----
+  if (conflicts.length > 0) {
+    const res = await askConflicts(conflicts);
+    if (res === null) return { cancelled: true, summary: [] };
+    for (const c of conflicts) {
+      if (res.get(c.key) !== "source") continue;
+      if (c.target === "settings") {
+        targetDoc.setIn(c.setPath, c.value);
+        settingsDirty = true;
+      } else if (credDoc) {
+        credDoc.setIn(c.setPath, c.value);
+        credDirty = true;
+      }
+      summary.push(`用来源 ${c.key}`);
+    }
+  }
+
+  if (settingsDirty || credDirty) {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    if (mode === "overwrite") {
+      if (settingsDirty && existsSync(targetSettingsPath)) {
+        copyFileSync(targetSettingsPath, `${targetSettingsPath}.bak-${stamp}`);
+      }
+      if (credDirty && existsSync(targetCredPath)) {
+        copyFileSync(targetCredPath, `${targetCredPath}.bak-${stamp}`);
+      }
+    }
+    if (settingsDirty) writeFileSync(targetSettingsPath, targetDoc.toString({}), "utf8");
+    if (credDoc && credDirty) writeFileSync(targetCredPath, credDoc.toString({}), "utf8");
+  }
+  if (summary.length === 0) summary.push("无变化：本库已包含来源全部条目且值一致");
+  return { cancelled: false, summary };
 }
 
-/** 是否是普通对象（非 null、非数组）。 */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/** 增量同步的逐项冲突裁定弹框：默认全部留本库；取消/ESC = 中止整个同步。 */
+class ConflictModal extends Modal {
+  private resolutions: Map<string, "source" | "local">;
+  private decided = false;
+  private repaints: (() => void)[] = [];
+
+  constructor(
+    app: App,
+    private items: ConfigConflict[],
+    private onFinish: (r: Map<string, "source" | "local"> | null) => void
+  ) {
+    super(app);
+    this.resolutions = new Map(items.map((it) => [it.key, "local" as const]));
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: `配置冲突（${this.items.length} 项）` });
+    contentEl.createEl("p", {
+      text: "以下同名项在来源与本库的值不一致。逐项选择：「用来源」将用来源的值覆盖本库该项，「留本库」保持现状。",
+    });
+    for (const it of this.items) {
+      const row = contentEl.createDiv({ cls: "dsh-conflict-row" });
+      row.createDiv({ text: it.key, cls: "dsh-conflict-key" });
+      const btns = row.createDiv({ cls: "dsh-conflict-btns" });
+      const bSource = btns.createEl("button", { text: "用来源" });
+      const bLocal = btns.createEl("button", { text: "留本库" });
+      const repaint = (): void => {
+        const pick = this.resolutions.get(it.key);
+        bSource.toggleClass("mod-cta", pick === "source");
+        bLocal.toggleClass("mod-cta", pick === "local");
+      };
+      bSource.addEventListener("click", () => {
+        this.resolutions.set(it.key, "source");
+        this.repaints.forEach((f) => f());
+      });
+      bLocal.addEventListener("click", () => {
+        this.resolutions.set(it.key, "local");
+        this.repaints.forEach((f) => f());
+      });
+      this.repaints.push(repaint);
+      repaint();
+    }
+    const footer = contentEl.createDiv({ cls: "dsh-conflict-footer" });
+    const mkBtn = (text: string, cls: string | undefined, fn: () => void): void => {
+      const b = footer.createEl("button", { text });
+      if (cls) b.addClass(cls);
+      b.addEventListener("click", fn);
+    };
+    mkBtn("全部用来源", undefined, () => {
+      for (const it of this.items) this.resolutions.set(it.key, "source");
+      this.repaints.forEach((f) => f());
+    });
+    mkBtn("全部留本库", undefined, () => {
+      for (const it of this.items) this.resolutions.set(it.key, "local");
+      this.repaints.forEach((f) => f());
+    });
+    mkBtn("应用选择", "mod-cta", () => this.finish(new Map(this.resolutions)));
+    mkBtn("取消（不改动）", undefined, () => this.finish(null));
+  }
+
+  onClose(): void {
+    if (!this.decided) this.onFinish(null);
+  }
+
+  private finish(r: Map<string, "source" | "local"> | null): void {
+    this.decided = true;
+    this.onFinish(r);
+    this.close();
+  }
 }
 
 interface WorkspaceStorage {
@@ -1456,11 +1692,6 @@ class InstanceManager {
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
 
-    // 0. 每次打开面板都同步主实例的模型供应商/凭据（无论实例是否已在运行）。
-    //    运行中的 DSH 会在 settings.yaml 写回后热重载，下次请求即可用上新配置。
-    syncModelConfig(vaultHome(vaultPath));
-    mark("配置同步");
-
     // 1. 复用：记录过的 URL 仍然有效才复用。
     //    只探测端口会被"半死服务 / 换过内核"误导——典型事故：记录是 rc 时代无 token 的 URL，
     //    端口上已换成需要 token 的 alpha → 面板 401 空白。URL 有效才复用；
@@ -1510,6 +1741,14 @@ class InstanceManager {
     // 4. 准备库专属数据目录（种入库根工作区），启动 + 等待就绪
     const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port, nodeBinDir);
     const dshHome = vaultHome(vaultPath);
+    // 库目录名称标记：供「同步模型配置」下拉框把哈希目录还原成库名（老库首次冷启动时补写）
+    mkdirSync(dshHome, { recursive: true });
+    try {
+      const marker = join(dshHome, "vault.path");
+      if (!existsSync(marker)) writeFileSync(marker, vaultPath, "utf8");
+    } catch {
+      // 标记写失败不影响启动，仅影响其它库在同步下拉框里的显示名
+    }
     if (needsAuthVersion(version)) {
       const backupDir = settings.backupDir.trim() || join(dshHome, "backups");
       migrateSessionProjectionCache(dshHome, backupDir);
@@ -1924,7 +2163,48 @@ export default class DshPlugin extends Plugin {
     this.statusBar = this.addStatusBarItem();
     this.updateStatusBar("已停止");
 
+    // 首次引导：本库没配置过模型、且本机存在可拷贝来源时，提示一次「同步模型配置」（见方法注释）
+    this.app.workspace.onLayoutReady(() => {
+      void this.maybeShowConfigHint();
+    });
+
     if (this.settings.autoStart) void this.openView();
+  }
+
+  /**
+   * 新用户首次打开插件的引导提示：
+   * 仅当 本库尚无模型配置 且 存在可拷贝来源（主实例或其它库）时弹一次，
+   * 带「去设置」直达设置页；弹过记 configHintShown 永不再扰。
+   * 无来源（真·全新机器第一个实例）不打扰——届时用户自行在设置里配置即可。
+   */
+  private async maybeShowConfigHint(): Promise<void> {
+    if (this.settings.configHintShown) return;
+    let vaultPath: string;
+    try {
+      vaultPath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
+    } catch {
+      return;
+    }
+    if (vaultHasModelConfig(vaultHome(vaultPath))) return; // 本库已有配置，无需引导
+    if (listConfigSources(vaultPath).length === 0) return; // 没有可拷贝来源，不打扰
+    this.settings.configHintShown = true;
+    await this.saveSettings();
+    const notice = new Notice("检测到本机其它 DSH 实例已配置模型，可一键拷贝到本库，无需重复填 API key。", 0);
+    const frag = new DocumentFragment();
+    const go = frag.createEl("button", { text: "去设置" });
+    const later = frag.createEl("button", { text: "以后再说" });
+    go.onclick = () => {
+      notice.hide();
+      const settingsUi = (this.app as unknown as {
+        setting?: { open(): void; openTabById(id: string): void };
+      }).setting;
+      if (settingsUi) {
+        settingsUi.open();
+        settingsUi.openTabById(this.manifest.id);
+      }
+    };
+    later.onclick = () => notice.hide();
+    notice.noticeEl.appendChild(frag);
   }
 
   /** 打开（或聚焦）DSH 面板。 */
@@ -2305,6 +2585,82 @@ class DshSettingTab extends PluginSettingTab {
           this.plugin.refreshBridgeConfig();
         })
       );
+
+    {
+      // 同步模型配置（0.5.0 扁平实例模型）：用户主动从主实例/其它库拷贝供应商与凭据，插件不做自动同步
+      const vaultPath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
+      const sources = listConfigSources(vaultPath);
+      let selectedId = sources[0]?.id ?? "";
+      let copyMode: "incremental" | "overwrite" = "incremental";
+      // 排版：标题+来源+方式+按钮一行；四点说明渲染为本行下方的独立说明区（setDesc 会把说明挤在左列）
+      new Setting(containerEl)
+        .setName("同步模型配置")
+        .addDropdown((dd) => {
+          if (sources.length === 0) dd.addOption("", "（未发现可用来源）");
+          for (const s of sources) dd.addOption(s.id, s.label);
+          dd.setValue(selectedId).onChange((v) => {
+            selectedId = v;
+          });
+        })
+        .addDropdown((dd) =>
+          dd
+            .addOption("incremental", "增量同步")
+            .addOption("overwrite", "覆盖同步")
+            .setValue("incremental")
+            .onChange((v) => {
+              copyMode = v as "incremental" | "overwrite";
+            })
+        )
+        .addButton((btn) =>
+          btn
+            .setButtonText("立即同步")
+            .setCta()
+            .setDisabled(sources.length === 0)
+            .onClick(async () => {
+              const src = sources.find((s) => s.id === selectedId);
+              if (!src) {
+                new Notice("请先选择同步来源。");
+                return;
+              }
+              btn.setDisabled(true);
+              try {
+                const result = await copyModelConfig(
+                  src.homePath,
+                  vaultHome(vaultPath),
+                  copyMode,
+                  (list) =>
+                    list.length === 0
+                      ? Promise.resolve(new Map<string, "source" | "local">())
+                      : new Promise<Map<string, "source" | "local"> | null>((resolve) => {
+                          new ConflictModal(this.app, list, resolve).open();
+                        })
+                );
+                if (result.cancelled) {
+                  new Notice("已取消，未修改任何配置。");
+                } else {
+                  new Notice(`模型配置同步完成：${result.summary.join("；")}`, 10_000);
+                  const changed = result.summary.length > 0 && !result.summary[0].startsWith("无变化");
+                  if (changed && this.plugin.settings.instances[vaultPath]) {
+                    new Notice("本库 DSH 实例正在运行：若新同步的模型选不中或不可用，关闭再重新打开面板即可让其加载新凭据。", 10_000);
+                  }
+                }
+              } catch (e) {
+                new Notice(`同步失败：${e instanceof Error ? e.message : String(e)}`, 10_000);
+              } finally {
+                btn.setDisabled(false);
+              }
+            })
+        );
+      const descWrap = containerEl.createDiv({ cls: "dsh-sync-desc" });
+      for (const line of [
+        "作用：把其它 DSH 实例（主实例或其它库）已配好的模型供应商与 API 凭据拷贝到本库。",
+        "增量（默认）＝只补缺：同名不同值时弹框逐项询问「用来源 / 留本库」；本库独有条目不动。",
+        "覆盖＝整体对齐来源：来源没有的条目会被清除（幽灵清扫）；覆盖前自动备份 .bak 文件。",
+        "不参与同步：每实例的登录会话票据、本库默认模型路由等库内选择。",
+      ]) {
+        descWrap.createDiv({ text: "· " + line });
+      }
+    }
 
     new Setting(containerEl)
       .setName("面板位置")

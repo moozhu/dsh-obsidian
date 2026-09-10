@@ -7371,7 +7371,7 @@ var import_https = require("https");
 var import_os = require("os");
 var import_path = require("path");
 var import_yaml = __toESM(require_dist());
-var BRIDGE_SOURCE = `(function(){if(window.__dshBridgeFill)return;var BRIDGE_LINE_RE=/\\[\\s*BRIDGES is delivering packages for you\u2026\u2026\\s*\xB7\\s*(\\d+)\\s*words\\s*\xB7\\s*L(\\d+):(\\d+)-L(\\d+):(\\d+)\\s*\xB7\\s*([^\\]]+?)\\s*\xB7\\s*\\]/;function mergeFill(e,i){if(!e)e='';var a=e.split('\\n'),p=false,r='',x;for(x=0;x<a.length;x++){var l=a[x];if(BRIDGE_LINE_RE.test(l))continue;var empty=l.trim()==='';if(empty&&p)continue;r=r===''?l:r+'\\n'+l;p=empty}r=r.replace(/^\\s+|\\s+$/g,'');if(i==='')return r;return r===''?i:i+'\\n'+r}function pick(){var el=document.querySelector('textarea[data-phase]')||document.querySelector('textarea');if(el)return el.readOnly||el.disabled?null:el;var eds=document.querySelectorAll('[contenteditable="true"]');for(var i=0;i<eds.length;i++){var ce=eds[i];if(ce.isContentEditable&&!ce.disabled&&ce.offsetParent!==null)return ce}return null}function isField(el){return el.tagName==='TEXTAREA'||el.tagName==='INPUT'}function fieldSet(el,val){var p=el.tagName==='INPUT'?window.HTMLInputElement.prototype:window.HTMLTextAreaElement.prototype;var d=Object.getOwnPropertyDescriptor(p,'value');d.set.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}))}function editSet(el,val){try{el.focus();var sel=window.getSelection();var rng=document.createRange();rng.selectNodeContents(el);sel.removeAllRanges();sel.addRange(rng);var ok=false;try{ok=document.execCommand('insertText',false,val)}catch(_){}if(!ok)throw new Error('insertText unavailable')}catch(_){el.textContent=val;el.dispatchEvent(new Event('input',{bubbles:true}))}}function fill(text){var n=0;function go(){var el=pick();if(el){var cur=isField(el)?el.value||'':el.textContent||'';var merged=mergeFill(cur,text);if(isField(el)){fieldSet(el,merged)}else{editSet(el,merged)}return}if(n<30){n++;setTimeout(go,n<10?150:500)}}go()}var kbdList=[];function kbdCombo(e){var k=e.key||'';if(k==='Control'||k==='Alt'||k==='Shift'||k==='Meta')return '';var p=[];if(e.ctrlKey)p.push('ctrl');if(e.altKey)p.push('alt');if(e.shiftKey)p.push('shift');if(e.metaKey)p.push('meta');if(!p.length)return '';p.push(k.toLowerCase());return p.join('+')}window.__dshKbdCfg=function(keys){kbdList=Array.isArray(keys)?keys.slice():[];void 0};document.addEventListener('keydown',function(e){var c=kbdCombo(e);if(c&&kbdList.indexOf(c)>=0){e.preventDefault();e.stopPropagation();try{console.log('__DSHKBD__'+c)}catch(_){}}},true);var vaultRoot=null;var openOn=false;function normP(p){return p.replace(/\\\\/g,'/').replace(/\\/+/g,'/')}function coll(p){var m=/^[A-Za-z]:/.exec(p),drive=m?m[0]:'',body=p.slice(drive.length),rooted=body.charAt(0)==='/',segs=[],i,parts=body.split('/');for(i=0;i<parts.length;i++){var s=parts[i];if(s===''||s==='.')continue;if(s==='..'){if(segs.length)segs.pop()}else{segs.push(s)}}return drive+(rooted?'/':'')+segs.join('/')}function resolveTxt(text){var t=text.trim();if(!t||t.length>300||!vaultRoot)return null;var r=normP(vaultRoot).replace(/\\/+$/,'');var abs=/^[A-Za-z]:/.test(t)||t.charAt(0)==='/'?normP(t):r+'/'+normP(t);var a=coll(abs);var rl=r.toLowerCase(),al=a.toLowerCase();if(al===rl||al.indexOf(rl+'/')===0)return a;return null}function isClickable(el){return el.tagName==='BUTTON'||el.tagName==='A'}function labelPrefixed(t){return /^(read|edit|write|think|grep|pwsh|tool|search|diff|web|bash|python|node|run|open|show|copy|cat|mkdir|rm|mv|add|delete)\\b/i.test(t)}function readable(p){return /\\.(md|markdown|txt|canvas|pdf|png|jpe?g|gif|svg|webp|bmp|ico|mp3|wav|ogg|oga|m4a|flac|opus|aac|mp4|webm|mov|mkv|avi|m4v|ogv|3gp|ts|js|jsx|tsx|mjs|cjs|json|css|scss|less|html|htm|xml|yaml|yml|csv|log|mdx|py|sh|bat|ps1)$/i.test(p)}function pathOf(el){var t=el.getAttribute?el.getAttribute('title'):null;if(t&&/[\\\\/]/.test(t))return t;return (el.textContent||'').trim()}window.__dshOpenCfg=function(cfg){if(cfg&&typeof cfg.root==='string'){vaultRoot=cfg.root;openOn=!!cfg.enabled}else{vaultRoot=null;openOn=false}};document.addEventListener('click',function(e){if(!openOn||!vaultRoot)return;var el=e.target;while(el&&el!==document.body){var txt=pathOf(el);if(txt.length>2&&txt.length<300&&/[\\\\/]/.test(txt)&&isClickable(el)&&!labelPrefixed(txt)){e.preventDefault();e.stopPropagation();var r=resolveTxt(txt);if(r&&readable(r)){try{console.log('__DSHOPEN__'+encodeURIComponent(r))}catch(_){}}return}el=el.parentElement}},true);window.__dshBridgeFill=fill;})();`;
+var BRIDGE_SOURCE = `(function(){if(window.__dshBridgeFill)return;var BRIDGE_LINE_RE=/\\[\\s*BRIDGES is delivering packages for you\u2026\u2026\\s*\xB7\\s*(\\d+)\\s*words\\s*\xB7\\s*L(\\d+):(\\d+)-L(\\d+):(\\d+)\\s*\xB7\\s*([^\\]]+?)\\s*\xB7\\s*\\]/;function mergeFill(e,i){if(!e)e='';var a=e.split('\\n'),p=false,r='',x;for(x=0;x<a.length;x++){var l=a[x];if(BRIDGE_LINE_RE.test(l))continue;var empty=l.trim()==='';if(empty&&p)continue;r=r===''?l:r+'\\n'+l;p=empty}r=r.replace(/^\\s+|\\s+$/g,'');if(i==='')return r;return r===''?i:i+'\\n'+r}function pick(){var el=document.querySelector('textarea[data-phase]')||document.querySelector('textarea');if(el)return el.readOnly||el.disabled?null:el;var eds=document.querySelectorAll('[contenteditable="true"]');for(var i=0;i<eds.length;i++){var ce=eds[i];if(ce.isContentEditable&&!ce.disabled&&ce.offsetParent!==null)return ce}return null}function isField(el){return el.tagName==='TEXTAREA'||el.tagName==='INPUT'}function fieldSet(el,val){var p=el.tagName==='INPUT'?window.HTMLInputElement.prototype:window.HTMLTextAreaElement.prototype;var d=Object.getOwnPropertyDescriptor(p,'value');d.set.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}))}function editSet(el,val){try{el.focus();var sel=window.getSelection();var rng=document.createRange();rng.selectNodeContents(el);sel.removeAllRanges();sel.addRange(rng);var ok=false;try{ok=document.execCommand('insertText',false,val)}catch(_){}if(!ok)throw new Error('insertText unavailable')}catch(_){el.textContent=val;el.dispatchEvent(new Event('input',{bubbles:true}))}}function fill(text){var n=0;function go(){var el=pick();if(el){var cur=isField(el)?el.value||'':el.textContent||'';var merged=mergeFill(cur,text);if(isField(el)){fieldSet(el,merged)}else{editSet(el,merged)}return}if(n<30){n++;setTimeout(go,n<10?150:500)}}go()}var kbdList=[];function kbdCombo(e){var k=e.key||'';if(k==='Control'||k==='Alt'||k==='Shift'||k==='Meta')return '';var p=[];if(e.ctrlKey)p.push('ctrl');if(e.altKey)p.push('alt');if(e.shiftKey)p.push('shift');if(e.metaKey)p.push('meta');if(!p.length)return '';p.push(k.toLowerCase());return p.join('+')}window.__dshKbdCfg=function(keys){kbdList=Array.isArray(keys)?keys.slice():[];void 0};document.addEventListener('keydown',function(e){var c=kbdCombo(e);if(c&&kbdList.indexOf(c)>=0){e.preventDefault();e.stopPropagation();try{console.log('__DSHKBD__'+c)}catch(_){}}},true);var vaultRoot=null;var openOn=false;function normP(p){return p.replace(/\\\\/g,'/').replace(/\\/+/g,'/')}function coll(p){var m=/^[A-Za-z]:/.exec(p),drive=m?m[0]:'',body=p.slice(drive.length),rooted=body.charAt(0)==='/',segs=[],i,parts=body.split('/');for(i=0;i<parts.length;i++){var s=parts[i];if(s===''||s==='.')continue;if(s==='..'){if(segs.length)segs.pop()}else{segs.push(s)}}return drive+(rooted?'/':'')+segs.join('/')}function resolveTxt(text){var t=text.trim();if(!t||t.length>300||!vaultRoot)return null;var r=normP(vaultRoot).replace(/\\/+$/,'');var abs=/^[A-Za-z]:/.test(t)||t.charAt(0)==='/'?normP(t):r+'/'+normP(t);var a=coll(abs);var rl=r.toLowerCase(),al=a.toLowerCase();if(al===rl||al.indexOf(rl+'/')===0)return a;return null}function isClickable(el){return el.tagName==='BUTTON'||el.tagName==='A'}function labelPrefixed(t){return /^(read|edit|write|think|grep|pwsh|tool|search|diff|web|bash|python|node|run|open|show|copy|cat|mkdir|rm|mv|add|delete)\\b/i.test(t)}function readable(p){return /\\.(md|markdown|txt|canvas|pdf|png|jpe?g|gif|svg|webp|bmp|ico|mp3|wav|ogg|oga|m4a|flac|opus|aac|mp4|webm|mov|mkv|avi|m4v|ogv|3gp|ts|js|jsx|tsx|mjs|cjs|json|css|scss|less|html|htm|xml|yaml|yml|csv|log|mdx|py|sh|bat|ps1)$/i.test(p)}function pathOf(el){var t=el.getAttribute?el.getAttribute('title'):null;if(t&&/[\\\\/]/.test(t))return t;return (el.textContent||'').trim()}window.__dshOpenCfg=function(cfg){if(cfg&&typeof cfg.root==='string'){vaultRoot=cfg.root;openOn=!!cfg.enabled}else{vaultRoot=null;openOn=false}};document.addEventListener('click',function(e){if(!openOn||!vaultRoot)return;var el=e.target;while(el&&el!==document.body){var txt=pathOf(el);if(txt.length>2&&txt.length<300&&/[\\\\/]/.test(txt)&&isClickable(el)&&!labelPrefixed(txt)){var r=resolveTxt(txt);if(r&&readable(r)){e.preventDefault();e.stopPropagation();try{console.log('__DSHOPEN__'+encodeURIComponent(r))}catch(_){}return}}el=el.parentElement}},true);window.__dshBridgeFill=fill;})();`;
 function hotkeyToCombo(hk) {
   if (!hk || typeof hk.key !== "string" || hk.key === "") return null;
   let ctrl = false;
@@ -7408,7 +7408,8 @@ var DEFAULT_SETTINGS = {
   backupDir: "",
   shortcutPassthrough: true,
   reverseBridge: true,
-  bottomPadding: 28
+  bottomPadding: 28,
+  configHintShown: false
 };
 function bootTotal(tb) {
   return tb.stages.reduce((s, x) => s + x.ms, 0);
@@ -7938,95 +7939,312 @@ function vaultHome(vaultPath) {
   const localAppData = process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local");
   return (0, import_path.join)(localAppData, "dsh-obsidian", hashPath(vaultPath).toString(16));
 }
-function syncModelConfig(vaultHomePath) {
-  const mainHome = process.env.DSH_HOME ?? (0, import_path.join)((0, import_os.homedir)(), ".dsh");
-  (0, import_fs.mkdirSync)(vaultHomePath, { recursive: true });
-  const mainCred = (0, import_path.join)(mainHome, ".credentials.yaml");
-  const vaultCred = (0, import_path.join)(vaultHomePath, ".credentials.yaml");
-  if ((0, import_fs.existsSync)(mainCred)) {
-    try {
-      const mergedCred = mergeYamlFile(mainCred, vaultCred);
-      const sanitized = sanitizeCredentialKeys(mergedCred);
-      (0, import_fs.writeFileSync)(vaultCred, sanitized, "utf8");
-    } catch {
-    }
+var MODEL_NAMESPACES = ["llm-pi-ai", "llm-deepseek"];
+function plainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function stableJson(v) {
+  if (plainObject(v)) {
+    return "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + stableJson(v[k])).join(",") + "}";
   }
-  const MODEL_NAMESPACES = ["llm-pi-ai", "llm-deepseek"];
-  const mainSettings = (0, import_path.join)(mainHome, "settings.yaml");
-  const vaultSettings = (0, import_path.join)(vaultHomePath, "settings.yaml");
-  if (!(0, import_fs.existsSync)(mainSettings)) return;
-  let mainDoc;
+  if (Array.isArray(v)) return "[" + v.map((x) => stableJson(x)).join(",") + "]";
+  return JSON.stringify(v === void 0 ? null : v);
+}
+function dshMainHome() {
+  return process.env.DSH_HOME ?? (0, import_path.join)((0, import_os.homedir)(), ".dsh");
+}
+function hasDshConfig(home) {
+  return (0, import_fs.existsSync)((0, import_path.join)(home, "settings.yaml")) || (0, import_fs.existsSync)((0, import_path.join)(home, ".credentials.yaml"));
+}
+function inferVaultName(home) {
   try {
-    mainDoc = (0, import_yaml.parseDocument)((0, import_fs.readFileSync)(mainSettings, "utf8"));
-    if (mainDoc.errors.length > 0 || mainDoc.toJS() == null) return;
-  } catch {
-    return;
-  }
-  const vaultDoc = (0, import_fs.existsSync)(vaultSettings) ? (0, import_yaml.parseDocument)((0, import_fs.readFileSync)(vaultSettings, "utf8")) : new import_yaml.Document({});
-  const mainRoot = mainDoc.toJS();
-  const vaultRoot = vaultDoc.toJS();
-  if (mainRoot == null) return;
-  let changed = false;
-  for (const ns of MODEL_NAMESPACES) {
-    const mainVal = mainRoot[ns];
-    if (mainVal === void 0) continue;
-    const vaultVal = vaultRoot?.[ns];
-    const merged = mergeModelSection(vaultVal, mainVal);
-    vaultDoc.setIn([ns], merged);
-    changed = true;
-  }
-  if (changed) {
-    try {
-      (0, import_fs.writeFileSync)(vaultSettings, vaultDoc.toString({}), "utf8");
-    } catch {
+    const file = (0, import_path.join)(home, "storages", "workspace.json");
+    if (!(0, import_fs.existsSync)(file)) return null;
+    const parsed = JSON.parse((0, import_fs.readFileSync)(file, "utf8"));
+    const ws = parsed.tables?.workspaces;
+    if (!ws) return null;
+    for (const w of Object.values(ws)) {
+      if (typeof w?.path === "string" && w.path) return (0, import_path.basename)(w.path);
     }
+    return null;
+  } catch {
+    return null;
   }
 }
-function mergeYamlFile(sourcePath, targetPath) {
-  const sourceDoc = (0, import_yaml.parseDocument)((0, import_fs.readFileSync)(sourcePath, "utf8"));
-  if (sourceDoc.errors.length > 0) {
-    return (0, import_fs.existsSync)(targetPath) ? (0, import_fs.readFileSync)(targetPath, "utf8") : "";
+function vaultHasModelConfig(home) {
+  try {
+    const root = readYamlRoot((0, import_path.join)(home, "settings.yaml"));
+    if (root) {
+      for (const ns of MODEL_NAMESPACES) {
+        const v = root[ns];
+        if (v === void 0) continue;
+        if (!plainObject(v)) return true;
+        if (Object.keys(v).length > 0) return true;
+      }
+    }
+    const refs = readYamlRoot((0, import_path.join)(home, ".credentials.yaml"))?.["refs"];
+    if (plainObject(refs) && Object.keys(refs).length > 0) return true;
+  } catch {
+    return true;
   }
-  if (!(0, import_fs.existsSync)(targetPath)) return sourceDoc.toString({});
-  const targetDoc = (0, import_yaml.parseDocument)((0, import_fs.readFileSync)(targetPath, "utf8"));
-  const sourceRoot = sourceDoc.toJS();
-  const targetRoot = targetDoc.toJS();
-  if (sourceRoot !== null && typeof sourceRoot === "object" && !Array.isArray(sourceRoot) && targetRoot !== null && typeof targetRoot === "object" && !Array.isArray(targetRoot)) {
-    const merged = mergeModelSection(targetRoot, sourceRoot);
-    targetDoc.setIn([], merged);
-    return targetDoc.toString({});
-  }
-  return sourceDoc.toString({});
+  return false;
 }
-function sanitizeCredentialKeys(yamlStr) {
+function listConfigSources(currentVaultPath) {
+  const out = [];
+  const mainHome = dshMainHome();
+  if (hasDshConfig(mainHome)) {
+    out.push({ id: "main", label: "\u4E3B\u5B9E\u4F8B\uFF08\u5B98\u65B9 DSH\uFF09", homePath: mainHome });
+  }
+  const baseDir = (0, import_path.join)(process.env.LOCALAPPDATA ?? (0, import_path.join)((0, import_os.homedir)(), "AppData", "Local"), "dsh-obsidian");
+  let names = [];
+  try {
+    names = (0, import_fs.readdirSync)(baseDir);
+  } catch {
+    names = [];
+  }
+  const currentHome = vaultHome(currentVaultPath);
+  const vaults = [];
+  for (const name of names.sort()) {
+    const home = (0, import_path.join)(baseDir, name);
+    try {
+      if (!(0, import_fs.statSync)(home).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    if (home === currentHome || !hasDshConfig(home)) continue;
+    let vp = "";
+    try {
+      const marker = (0, import_path.join)(home, "vault.path");
+      if ((0, import_fs.existsSync)(marker)) vp = (0, import_fs.readFileSync)(marker, "utf8").trim();
+    } catch {
+      vp = "";
+    }
+    const base = vp ? (0, import_path.basename)(vp) : inferVaultName(home) ?? `\u672A\u8BC6\u522B\u5E93 ${name.slice(0, 8)}`;
+    vaults.push({ id: `vault:${name}`, homePath: home, base, hash6: name.slice(0, 6) });
+  }
+  const counts = /* @__PURE__ */ new Map();
+  for (const v of vaults) counts.set(v.base, (counts.get(v.base) ?? 0) + 1);
+  for (const v of vaults) {
+    const label = (counts.get(v.base) ?? 0) > 1 ? `\u5E93 \xB7 ${v.base}\uFF08${v.hash6}\uFF09` : `\u5E93 \xB7 ${v.base}`;
+    out.push({ id: v.id, label, homePath: v.homePath });
+  }
+  return out;
+}
+function readYamlRoot(path) {
+  if (!(0, import_fs.existsSync)(path)) return null;
   let doc;
   try {
-    doc = (0, import_yaml.parseDocument)(yamlStr);
+    doc = (0, import_yaml.parseDocument)((0, import_fs.readFileSync)(path, "utf8"));
   } catch {
-    return yamlStr;
+    throw new Error(`\u65E0\u6CD5\u89E3\u6790 ${(0, import_path.basename)(path)}`);
   }
-  if (doc.errors.length > 0) return yamlStr;
-  const ALLOWED = /* @__PURE__ */ new Set(["version", "refs", "records"]);
+  if (doc.errors.length > 0) throw new Error(`${(0, import_path.basename)(path)} \u683C\u5F0F\u6709\u8BEF`);
   const root = doc.toJS();
-  if (root === null || typeof root !== "object" || Array.isArray(root)) return yamlStr;
-  for (const key of Object.keys(root)) {
-    if (!ALLOWED.has(key)) doc.delete(key);
-  }
-  return doc.toString({});
+  if (root == null) return null;
+  if (!plainObject(root)) throw new Error(`${(0, import_path.basename)(path)} \u7ED3\u6784\u5F02\u5E38`);
+  return root;
 }
-function mergeModelSection(target, source) {
-  if (isPlainObject(target) && isPlainObject(source)) {
-    const out = { ...target };
-    for (const [key, value] of Object.entries(source)) {
-      out[key] = mergeModelSection(out[key], value);
+async function copyModelConfig(sourceHome, targetHome, mode, askConflicts) {
+  const summary = [];
+  const conflicts = [];
+  (0, import_fs.mkdirSync)(targetHome, { recursive: true });
+  const srcSettings = readYamlRoot((0, import_path.join)(sourceHome, "settings.yaml")) ?? {};
+  const targetSettingsPath = (0, import_path.join)(targetHome, "settings.yaml");
+  let targetDoc;
+  if ((0, import_fs.existsSync)(targetSettingsPath)) {
+    targetDoc = (0, import_yaml.parseDocument)((0, import_fs.readFileSync)(targetSettingsPath, "utf8"));
+    if (targetDoc.errors.length > 0) throw new Error("\u672C\u5E93 settings.yaml \u683C\u5F0F\u6709\u8BEF\uFF0C\u8BF7\u5148\u4FEE\u590D\u518D\u540C\u6B65");
+  } else {
+    targetDoc = new import_yaml.Document({});
+  }
+  const targetRoot = targetDoc.toJS() ?? {};
+  let settingsDirty = false;
+  for (const ns of MODEL_NAMESPACES) {
+    const srcVal = srcSettings[ns];
+    const tgtVal = targetRoot[ns];
+    if (srcVal === void 0) {
+      if (mode === "overwrite" && tgtVal !== void 0) {
+        targetDoc.delete(ns);
+        summary.push(`\u5220\u9664 ${ns}\uFF08\u6765\u6E90\u6CA1\u6709\uFF09`);
+        settingsDirty = true;
+      }
+      continue;
     }
-    return out;
+    if (mode === "overwrite") {
+      targetDoc.setIn([ns], srcVal);
+      summary.push(`\u8986\u76D6 ${ns}`);
+      settingsDirty = true;
+      continue;
+    }
+    if (tgtVal === void 0) {
+      targetDoc.setIn([ns], srcVal);
+      summary.push(`\u65B0\u589E ${ns}`);
+      settingsDirty = true;
+      continue;
+    }
+    if (!plainObject(srcVal) || !plainObject(tgtVal)) {
+      if (stableJson(srcVal) !== stableJson(tgtVal)) {
+        conflicts.push({ target: "settings", key: `\u547D\u540D\u7A7A\u95F4 ${ns}`, setPath: [ns], value: srcVal });
+      }
+      continue;
+    }
+    const srcProviders = srcVal["providers"];
+    const tgtProviders = tgtVal["providers"];
+    if (plainObject(srcProviders) && plainObject(tgtProviders)) {
+      for (const pid of Object.keys(srcProviders).sort()) {
+        if (tgtProviders[pid] === void 0) {
+          targetDoc.setIn([ns, "providers", pid], srcProviders[pid]);
+          summary.push(`\u65B0\u589E\u4F9B\u5E94\u5546 ${pid}`);
+          settingsDirty = true;
+        } else if (stableJson(srcProviders[pid]) !== stableJson(tgtProviders[pid])) {
+          conflicts.push({ target: "settings", key: `\u4F9B\u5E94\u5546 ${pid}\uFF08${ns}\uFF09`, setPath: [ns, "providers", pid], value: srcProviders[pid] });
+        }
+      }
+    }
+    for (const key of Object.keys(srcVal)) {
+      if (key === "providers" && plainObject(tgtProviders)) continue;
+      const s = srcVal[key];
+      const t = tgtVal[key];
+      if (s === void 0) continue;
+      if (t === void 0) {
+        targetDoc.setIn([ns, key], s);
+        summary.push(`\u65B0\u589E ${ns}.${key}`);
+        settingsDirty = true;
+      } else if (stableJson(s) !== stableJson(t)) {
+        conflicts.push({ target: "settings", key: `${ns}.${key}`, setPath: [ns, key], value: s });
+      }
+    }
   }
-  return source;
+  const srcCred = readYamlRoot((0, import_path.join)(sourceHome, ".credentials.yaml"));
+  const targetCredPath = (0, import_path.join)(targetHome, ".credentials.yaml");
+  let credDoc = null;
+  let credDirty = false;
+  if (srcCred) {
+    if ((0, import_fs.existsSync)(targetCredPath)) {
+      credDoc = (0, import_yaml.parseDocument)((0, import_fs.readFileSync)(targetCredPath, "utf8"));
+      if (credDoc.errors.length > 0) throw new Error("\u672C\u5E93 .credentials.yaml \u683C\u5F0F\u6709\u8BEF\uFF0C\u8BF7\u5148\u4FEE\u590D\u518D\u540C\u6B65");
+    } else {
+      credDoc = new import_yaml.Document({});
+      credDoc.setIn(["version"], srcCred["version"] ?? 1);
+      credDoc.setIn(["records"], {});
+      summary.push("\u65B0\u5EFA\u51ED\u636E\u6587\u4EF6");
+      credDirty = true;
+    }
+    const credRoot = credDoc.toJS() ?? {};
+    const srcRefs = plainObject(srcCred["refs"]) ? srcCred["refs"] : {};
+    const tgtRefs = plainObject(credRoot["refs"]) ? credRoot["refs"] : {};
+    if (mode === "overwrite") {
+      credDoc.setIn(["refs"], srcRefs);
+      summary.push("\u8986\u76D6\u51ED\u636E refs\uFF08records \u4FDD\u7559\uFF09");
+      credDirty = true;
+    } else {
+      for (const key of Object.keys(srcRefs).sort()) {
+        if (tgtRefs[key] === void 0) {
+          credDoc.setIn(["refs", key], srcRefs[key]);
+          summary.push(`\u65B0\u589E\u51ED\u636E ${key}`);
+          credDirty = true;
+        } else if (stableJson(srcRefs[key]) !== stableJson(tgtRefs[key])) {
+          conflicts.push({ target: "credentials", key: `\u51ED\u636E ${key}`, setPath: ["refs", key], value: srcRefs[key] });
+        }
+      }
+    }
+  }
+  if (conflicts.length > 0) {
+    const res = await askConflicts(conflicts);
+    if (res === null) return { cancelled: true, summary: [] };
+    for (const c of conflicts) {
+      if (res.get(c.key) !== "source") continue;
+      if (c.target === "settings") {
+        targetDoc.setIn(c.setPath, c.value);
+        settingsDirty = true;
+      } else if (credDoc) {
+        credDoc.setIn(c.setPath, c.value);
+        credDirty = true;
+      }
+      summary.push(`\u7528\u6765\u6E90 ${c.key}`);
+    }
+  }
+  if (settingsDirty || credDirty) {
+    const stamp = (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    if (mode === "overwrite") {
+      if (settingsDirty && (0, import_fs.existsSync)(targetSettingsPath)) {
+        (0, import_fs.copyFileSync)(targetSettingsPath, `${targetSettingsPath}.bak-${stamp}`);
+      }
+      if (credDirty && (0, import_fs.existsSync)(targetCredPath)) {
+        (0, import_fs.copyFileSync)(targetCredPath, `${targetCredPath}.bak-${stamp}`);
+      }
+    }
+    if (settingsDirty) (0, import_fs.writeFileSync)(targetSettingsPath, targetDoc.toString({}), "utf8");
+    if (credDoc && credDirty) (0, import_fs.writeFileSync)(targetCredPath, credDoc.toString({}), "utf8");
+  }
+  if (summary.length === 0) summary.push("\u65E0\u53D8\u5316\uFF1A\u672C\u5E93\u5DF2\u5305\u542B\u6765\u6E90\u5168\u90E8\u6761\u76EE\u4E14\u503C\u4E00\u81F4");
+  return { cancelled: false, summary };
 }
-function isPlainObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+var ConflictModal = class extends import_obsidian.Modal {
+  constructor(app, items, onFinish) {
+    super(app);
+    this.items = items;
+    this.onFinish = onFinish;
+    this.resolutions = new Map(items.map((it) => [it.key, "local"]));
+  }
+  resolutions;
+  decided = false;
+  repaints = [];
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: `\u914D\u7F6E\u51B2\u7A81\uFF08${this.items.length} \u9879\uFF09` });
+    contentEl.createEl("p", {
+      text: "\u4EE5\u4E0B\u540C\u540D\u9879\u5728\u6765\u6E90\u4E0E\u672C\u5E93\u7684\u503C\u4E0D\u4E00\u81F4\u3002\u9010\u9879\u9009\u62E9\uFF1A\u300C\u7528\u6765\u6E90\u300D\u5C06\u7528\u6765\u6E90\u7684\u503C\u8986\u76D6\u672C\u5E93\u8BE5\u9879\uFF0C\u300C\u7559\u672C\u5E93\u300D\u4FDD\u6301\u73B0\u72B6\u3002"
+    });
+    for (const it of this.items) {
+      const row = contentEl.createDiv({ cls: "dsh-conflict-row" });
+      row.createDiv({ text: it.key, cls: "dsh-conflict-key" });
+      const btns = row.createDiv({ cls: "dsh-conflict-btns" });
+      const bSource = btns.createEl("button", { text: "\u7528\u6765\u6E90" });
+      const bLocal = btns.createEl("button", { text: "\u7559\u672C\u5E93" });
+      const repaint = () => {
+        const pick = this.resolutions.get(it.key);
+        bSource.toggleClass("mod-cta", pick === "source");
+        bLocal.toggleClass("mod-cta", pick === "local");
+      };
+      bSource.addEventListener("click", () => {
+        this.resolutions.set(it.key, "source");
+        this.repaints.forEach((f) => f());
+      });
+      bLocal.addEventListener("click", () => {
+        this.resolutions.set(it.key, "local");
+        this.repaints.forEach((f) => f());
+      });
+      this.repaints.push(repaint);
+      repaint();
+    }
+    const footer = contentEl.createDiv({ cls: "dsh-conflict-footer" });
+    const mkBtn = (text, cls, fn) => {
+      const b = footer.createEl("button", { text });
+      if (cls) b.addClass(cls);
+      b.addEventListener("click", fn);
+    };
+    mkBtn("\u5168\u90E8\u7528\u6765\u6E90", void 0, () => {
+      for (const it of this.items) this.resolutions.set(it.key, "source");
+      this.repaints.forEach((f) => f());
+    });
+    mkBtn("\u5168\u90E8\u7559\u672C\u5E93", void 0, () => {
+      for (const it of this.items) this.resolutions.set(it.key, "local");
+      this.repaints.forEach((f) => f());
+    });
+    mkBtn("\u5E94\u7528\u9009\u62E9", "mod-cta", () => this.finish(new Map(this.resolutions)));
+    mkBtn("\u53D6\u6D88\uFF08\u4E0D\u6539\u52A8\uFF09", void 0, () => this.finish(null));
+  }
+  onClose() {
+    if (!this.decided) this.onFinish(null);
+  }
+  finish(r) {
+    this.decided = true;
+    this.onFinish(r);
+    this.close();
+  }
+};
 function seedWorkspace(vaultHomePath, vaultPath) {
   const storageFile = (0, import_path.join)(vaultHomePath, "storages", "workspace.json");
   let canonical;
@@ -8346,8 +8564,6 @@ var InstanceManager = class {
     };
     const settings = this.getSettings();
     const record = settings.instances[vaultPath];
-    syncModelConfig(vaultHome(vaultPath));
-    mark("\u914D\u7F6E\u540C\u6B65");
     if (record) {
       const recordedUrl = record.url ?? `http://127.0.0.1:${record.port}/`;
       const probe = await probeUrl(recordedUrl);
@@ -8385,6 +8601,12 @@ var InstanceManager = class {
     mark("\u7AEF\u53E3\u5206\u914D");
     const { command: bootCommand, npxOnly, version } = resolveBootCommand(settings, port, nodeBinDir);
     const dshHome = vaultHome(vaultPath);
+    (0, import_fs.mkdirSync)(dshHome, { recursive: true });
+    try {
+      const marker = (0, import_path.join)(dshHome, "vault.path");
+      if (!(0, import_fs.existsSync)(marker)) (0, import_fs.writeFileSync)(marker, vaultPath, "utf8");
+    } catch {
+    }
     if (needsAuthVersion(version)) {
       const backupDir = settings.backupDir.trim() || (0, import_path.join)(dshHome, "backups");
       migrateSessionProjectionCache(dshHome, backupDir);
@@ -8715,7 +8937,43 @@ var DshPlugin = class extends import_obsidian.Plugin {
     this.addSettingTab(new DshSettingTab(this.app, this));
     this.statusBar = this.addStatusBarItem();
     this.updateStatusBar("\u5DF2\u505C\u6B62");
+    this.app.workspace.onLayoutReady(() => {
+      void this.maybeShowConfigHint();
+    });
     if (this.settings.autoStart) void this.openView();
+  }
+  /**
+   * 新用户首次打开插件的引导提示：
+   * 仅当 本库尚无模型配置 且 存在可拷贝来源（主实例或其它库）时弹一次，
+   * 带「去设置」直达设置页；弹过记 configHintShown 永不再扰。
+   * 无来源（真·全新机器第一个实例）不打扰——届时用户自行在设置里配置即可。
+   */
+  async maybeShowConfigHint() {
+    if (this.settings.configHintShown) return;
+    let vaultPath;
+    try {
+      vaultPath = this.app.vault.adapter.getBasePath();
+    } catch {
+      return;
+    }
+    if (vaultHasModelConfig(vaultHome(vaultPath))) return;
+    if (listConfigSources(vaultPath).length === 0) return;
+    this.settings.configHintShown = true;
+    await this.saveSettings();
+    const notice = new import_obsidian.Notice("\u68C0\u6D4B\u5230\u672C\u673A\u5176\u5B83 DSH \u5B9E\u4F8B\u5DF2\u914D\u7F6E\u6A21\u578B\uFF0C\u53EF\u4E00\u952E\u62F7\u8D1D\u5230\u672C\u5E93\uFF0C\u65E0\u9700\u91CD\u590D\u586B API key\u3002", 0);
+    const frag = new DocumentFragment();
+    const go = frag.createEl("button", { text: "\u53BB\u8BBE\u7F6E" });
+    const later = frag.createEl("button", { text: "\u4EE5\u540E\u518D\u8BF4" });
+    go.onclick = () => {
+      notice.hide();
+      const settingsUi = this.app.setting;
+      if (settingsUi) {
+        settingsUi.open();
+        settingsUi.openTabById(this.manifest.id);
+      }
+    };
+    later.onclick = () => notice.hide();
+    notice.noticeEl.appendChild(frag);
   }
   /** 打开（或聚焦）DSH 面板。 */
   async openView() {
@@ -8996,6 +9254,64 @@ var DshSettingTab = class extends import_obsidian.PluginSettingTab {
         this.plugin.refreshBridgeConfig();
       })
     );
+    {
+      const vaultPath = this.app.vault.adapter.getBasePath();
+      const sources = listConfigSources(vaultPath);
+      let selectedId = sources[0]?.id ?? "";
+      let copyMode = "incremental";
+      new import_obsidian.Setting(containerEl).setName("\u540C\u6B65\u6A21\u578B\u914D\u7F6E").addDropdown((dd) => {
+        if (sources.length === 0) dd.addOption("", "\uFF08\u672A\u53D1\u73B0\u53EF\u7528\u6765\u6E90\uFF09");
+        for (const s of sources) dd.addOption(s.id, s.label);
+        dd.setValue(selectedId).onChange((v) => {
+          selectedId = v;
+        });
+      }).addDropdown(
+        (dd) => dd.addOption("incremental", "\u589E\u91CF\u540C\u6B65").addOption("overwrite", "\u8986\u76D6\u540C\u6B65").setValue("incremental").onChange((v) => {
+          copyMode = v;
+        })
+      ).addButton(
+        (btn) => btn.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().setDisabled(sources.length === 0).onClick(async () => {
+          const src = sources.find((s) => s.id === selectedId);
+          if (!src) {
+            new import_obsidian.Notice("\u8BF7\u5148\u9009\u62E9\u540C\u6B65\u6765\u6E90\u3002");
+            return;
+          }
+          btn.setDisabled(true);
+          try {
+            const result = await copyModelConfig(
+              src.homePath,
+              vaultHome(vaultPath),
+              copyMode,
+              (list) => list.length === 0 ? Promise.resolve(/* @__PURE__ */ new Map()) : new Promise((resolve) => {
+                new ConflictModal(this.app, list, resolve).open();
+              })
+            );
+            if (result.cancelled) {
+              new import_obsidian.Notice("\u5DF2\u53D6\u6D88\uFF0C\u672A\u4FEE\u6539\u4EFB\u4F55\u914D\u7F6E\u3002");
+            } else {
+              new import_obsidian.Notice(`\u6A21\u578B\u914D\u7F6E\u540C\u6B65\u5B8C\u6210\uFF1A${result.summary.join("\uFF1B")}`, 1e4);
+              const changed = result.summary.length > 0 && !result.summary[0].startsWith("\u65E0\u53D8\u5316");
+              if (changed && this.plugin.settings.instances[vaultPath]) {
+                new import_obsidian.Notice("\u672C\u5E93 DSH \u5B9E\u4F8B\u6B63\u5728\u8FD0\u884C\uFF1A\u82E5\u65B0\u540C\u6B65\u7684\u6A21\u578B\u9009\u4E0D\u4E2D\u6216\u4E0D\u53EF\u7528\uFF0C\u5173\u95ED\u518D\u91CD\u65B0\u6253\u5F00\u9762\u677F\u5373\u53EF\u8BA9\u5176\u52A0\u8F7D\u65B0\u51ED\u636E\u3002", 1e4);
+              }
+            }
+          } catch (e) {
+            new import_obsidian.Notice(`\u540C\u6B65\u5931\u8D25\uFF1A${e instanceof Error ? e.message : String(e)}`, 1e4);
+          } finally {
+            btn.setDisabled(false);
+          }
+        })
+      );
+      const descWrap = containerEl.createDiv({ cls: "dsh-sync-desc" });
+      for (const line of [
+        "\u4F5C\u7528\uFF1A\u628A\u5176\u5B83 DSH \u5B9E\u4F8B\uFF08\u4E3B\u5B9E\u4F8B\u6216\u5176\u5B83\u5E93\uFF09\u5DF2\u914D\u597D\u7684\u6A21\u578B\u4F9B\u5E94\u5546\u4E0E API \u51ED\u636E\u62F7\u8D1D\u5230\u672C\u5E93\u3002",
+        "\u589E\u91CF\uFF08\u9ED8\u8BA4\uFF09\uFF1D\u53EA\u8865\u7F3A\uFF1A\u540C\u540D\u4E0D\u540C\u503C\u65F6\u5F39\u6846\u9010\u9879\u8BE2\u95EE\u300C\u7528\u6765\u6E90 / \u7559\u672C\u5E93\u300D\uFF1B\u672C\u5E93\u72EC\u6709\u6761\u76EE\u4E0D\u52A8\u3002",
+        "\u8986\u76D6\uFF1D\u6574\u4F53\u5BF9\u9F50\u6765\u6E90\uFF1A\u6765\u6E90\u6CA1\u6709\u7684\u6761\u76EE\u4F1A\u88AB\u6E05\u9664\uFF08\u5E7D\u7075\u6E05\u626B\uFF09\uFF1B\u8986\u76D6\u524D\u81EA\u52A8\u5907\u4EFD .bak \u6587\u4EF6\u3002",
+        "\u4E0D\u53C2\u4E0E\u540C\u6B65\uFF1A\u6BCF\u5B9E\u4F8B\u7684\u767B\u5F55\u4F1A\u8BDD\u7968\u636E\u3001\u672C\u5E93\u9ED8\u8BA4\u6A21\u578B\u8DEF\u7531\u7B49\u5E93\u5185\u9009\u62E9\u3002"
+      ]) {
+        descWrap.createDiv({ text: "\xB7 " + line });
+      }
+    }
     new import_obsidian.Setting(containerEl).setName("\u9762\u677F\u4F4D\u7F6E").setDesc("DSH \u9762\u677F\u663E\u793A\u7684\u4F4D\u7F6E\u3002").addDropdown(
       (dropdown) => dropdown.addOption("right-sidebar", "\u53F3\u4FA7\u8FB9\u680F").addOption("left-sidebar", "\u5DE6\u4FA7\u8FB9\u680F").addOption("tab", "\u65B0\u6807\u7B7E\u9875").setValue(this.plugin.settings.viewLocation).onChange(async (value) => {
         this.plugin.settings.viewLocation = value;

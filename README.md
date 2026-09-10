@@ -9,6 +9,8 @@ Embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (D
 - 🗂 **One instance per vault** — isolated port, data directory and sessions per vault; open several vaults side by side, zero interference
 - 🧲 **Two-way Obsidian ⇄ DSH bridge** — right-click selected text to hand DSH the exact file + line range; then click any vault file path DSH mentions to jump straight back to that note. Zero copy-paste round-trips
 - ⌨️ **Hotkeys that don't get eaten** — the Obsidian shortcuts you configured keep working while the DSH panel has focus
+- ⚡ **Zero command line — one click from nothing to chatting** — no Node.js on the machine? No DSH either? Fine: the panel one-clicks in a private portable runtime (~30 MB, no admin, system untouched), and the DSH kernel then downloads and starts on its own — live progress, mirror-backed. Newcomers never open a terminal
+- 🔁 **Set up models once, reuse everywhere** — "Sync model config" copies providers & API keys between any DSH instances on your machine (main desktop instance or other vaults), with incremental (per-item conflict dialog) and overwrite (auto-backup) modes
 - 🎛 **You decide when to update** — tracks the official stable channel; updates install only after explicit confirmation. **No silent upgrades, ever.**
 
 ## Features
@@ -17,7 +19,7 @@ Embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (D
 - **Send selection to DSH**: right-click (or command palette) on selected text — a locator line (file + `L:col` range) lands in the DSH composer; the model reads the region on demand
 - **Open paths in Obsidian**: click a vault file path shown in the DSH chat and the note opens in Obsidian (focuses an existing tab, or opens a new one); a missing file gets a clear notice, while out-of-vault and binary paths keep DSH's own behavior
 - **Hotkey passthrough**: Obsidian shortcuts (Command palette, Quick switcher, Settings…) keep firing while focus is inside the DSH panel — mirrors your own hotkey configuration, one toggle in settings
-- **Boot diagnostics**: settings shows a per-stage timing trace of the last panel start (config sync / probe / port / kernel / UI load), one-click copy for bug reports
+- **Boot diagnostics**: settings shows a per-stage timing trace of the last panel start (probe / Node detect / port / kernel / UI load), one-click copy for bug reports
 - **Bottom padding**: adjustable 0–40px footer with a divider line, so the Obsidian status bar never covers panel content
 - **Automatic data migration**: upgrading an older kernel to the current browser-auth release auto-migrates session data (single-file and sharded layouts), history carried over seamlessly
 - **Backup before migration**: old data is backed up locally before any migration — custom path supported, one click to reveal the backup folder in Explorer
@@ -25,13 +27,14 @@ Embeds the [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (D
 - **Updates only on confirmation**: check for the newest stable kernel in settings; install happens only after you confirm — startup never touches the network to change versions
 - **Registry mirror fallback**: npm official source fails → auto-switches to the npmmirror mirror (friendlier on mainland networks)
 - **Visible install progress**: persistent global notice with elapsed-time ticker, plus clear success/failure result — no more "did it actually install?"
-- **Model config once, used everywhere**: one-way sync of providers & API credentials from your main DSH to every vault — add a vendor/key once, no per-vault re-setup
+- **Model config sync, on your terms**: copy LLM providers & API credentials from any DSH instance (main or another vault) into this vault — pick **incremental** (union, per-item conflict dialog) or **overwrite** (align to source, auto-backup). You trigger it; there is **no silent background sync**
+- **Zero-terminal bootstrap**: one click takes a bare machine (no Node.js, no DSH) to a running chat — a private portable Node runtime installs itself (~30 MB, no admin, system untouched), the DSH kernel then downloads and starts on its own; live progress throughout, mirror-backed, and detection even recovers when PATH is broken
 - **Diagnosable startup failures**: real logs with error tail on failure; stale process trees are cleaned up on timeout — not just a bare "startup timed out"
 
 ## Requirements
 
 - Obsidian desktop (v1.4+, Windows)
-- [Node.js](https://nodejs.org) — detected at startup; the panel shows a download link if missing
+- Node.js — **not required up front**: if it's missing (or broken out of PATH), the plugin can one-click install a private portable runtime, or detect an existing install by absolute path
 
 ## Install
 
@@ -79,22 +82,20 @@ When you want a new version — Settings → "dsh version update": the plugin ch
 | Re-open vault B | Re-launches on the same port; history is still there |
 | Port taken / manual DSH running | Only manages its own instances; finds a free port instead of touching manual ones |
 
-## Shared model configuration (set up once, used everywhere)
+## Model config sync (set up once, reuse everywhere)
 
-Your **main DSH** (e.g. the desktop instance at `http://127.0.0.1:3080`, whose data lives in `~/.dsh`) is the **single source of truth** for model *infrastructure*. On every vault instance startup, the plugin one-way syncs from the main instance to that vault:
+Every DSH instance on your machine is a **peer**: the main instance (e.g. the desktop app, data in `~/.dsh`) and each vault instance. There is **no automatic background sync** — copies happen only when **you** ask, from the source **you** pick:
 
-- **LLM providers** (`llm-pi-ai` and `llm-deepseek` namespaces in `settings.yaml`: base URLs, model lists, routes)
-- **API credentials** (`.credentials.yaml`)
+Settings → **Sync model config** → choose a source (main instance or any other vault, listed by vault name) → choose a mode → **Sync now**:
 
-Add a new vendor or API key once, then just open (or reopen) any vault panel — available everywhere, no per-vault re-setup (DSH hot-reloads `settings.yaml`).
+- **Incremental (default)**: copies what this vault is missing; when the same entry differs, a dialog asks **per item** ("use source" / "keep this vault", cancel changes nothing)
+- **Overwrite**: this vault's providers & credential keys align to the source wholesale — entries the source lacks are cleared (ghost sweep); both files are backed up as `.bak-<timestamp>` before writing
 
-**Not synced on purpose** — each vault keeps its own choice:
+**Synced**: LLM providers (`llm-pi-ai` / `llm-deepseek`) and API credential **refs**. **Never synced**: per-instance login records (every instance keeps its own session), default model route (`agent-default-model`), search model (`web-search-deepseek`) and the plugin system (`profiles`) — vault-level choices stay per vault.
 
-- **Default model route** (`agent-default-model`): e.g. main uses DeepSeek, a vault uses GPT/MiMo
-- **Search model** (`web-search-deepseek`): each vault may use its own search model
-- **Plugin systems** (`profiles` / node_modules): different vaults can use different plugin sets
+Stateless by design: after a copy, instances evolve independently and nothing "reappears" behind your back. To propagate an edit everywhere, run Sync from the edited instance's vault once more. A **one-time first-run hint** appears when a fresh empty vault finds existing configs elsewhere on the machine.
 
-Conflict handling: provider/credential dictionaries use a **union merge** (vault-only entries kept, shared entries overridden by main, main-only entries added); direction is strictly **main → vault, one-way** — changes inside a vault never write back to the main instance.
+> If newly synced models can't be selected, close and reopen the DSH panel — the instance reads credentials at startup.
 
 ## Data & privacy
 
@@ -114,13 +115,16 @@ Conflict handling: provider/credential dictionaries use a **union merge** (vault
 | Stop instance on Obsidian close | Frees memory on close; disable to keep it resident for instant relaunch |
 | Hotkey passthrough | Obsidian shortcuts keep working while the DSH panel is focused (mirrors your hotkey settings) |
 | Reverse bridge | Click a vault file path in the DSH chat to open that note in Obsidian |
+| Sync model config | Copy providers & API keys from another DSH instance — incremental (per-item conflict dialog) or overwrite (auto-backup); one-time first-run hint |
 | Panel location | Right sidebar / Left sidebar / Tab |
 | Panel bottom padding | 0–40px footer gap with a divider line, live-adjustable |
 | Boot timing diagnostics | Per-stage timing of the last startup, one-click copy for feedback |
 
 ## FAQ
 
-- **Startup timeout**: verify Node.js is installed; set "dsh executable path" to the output of `where dsh.cmd` (or npm global path `%APPDATA%\npm\dsh.cmd`)
+- **Startup timeout / "Node.js not detected"**: the panel can one-click install a private portable Node (no admin needed); otherwise set "dsh executable path" to the output of `where dsh.cmd` (or npm global path `%APPDATA%\npm\dsh.cmd`)
+- **Newly synced model can't be selected / used**: close and reopen the DSH panel — the instance reads credentials at startup
+- **Custom-provider models (e.g. ModelScope `org/model`) weren't clickable / the model picker wouldn't open**: known 0.4.0 bug (the reverse bridge treated slash-containing text as a path and swallowed the click) — **fixed in 0.5.0**
 - **Blank panel**: confirm the status bar says "running"; if still blank, restart Obsidian
 - **Slow first launch**: expected — npx downloads the DSH package; subsequent launches are instant
 - **Old status after switching vaults**: each vault has its own instance; the status bar shows the current window's instance
